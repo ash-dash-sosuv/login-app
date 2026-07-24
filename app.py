@@ -1,9 +1,11 @@
 import base64
+import json
 import os
 import secrets
 import smtplib
 import socket
 import time
+import urllib.request
 from email.message import EmailMessage
 from io import BytesIO
 
@@ -176,18 +178,52 @@ def generate_email_otp():
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def send_otp_email(to_email, code):
-    """Email a one-time login code.
+def _otp_email_body(code):
+    return (
+        f"Your verification code is {code}.\n\n"
+        f"It expires in {EMAIL_OTP_TTL_SECONDS // 60} minutes. "
+        "If you didn't try to sign in, you can ignore this email."
+    )
 
-    Falls back to printing the code to the server console when SMTP isn't
-    configured, so local development works without a real email account. Set
-    SMTP_HOST (and friends) to send real email in production.
+
+def _email_timeout():
+    # Keep this well under gunicorn's worker timeout so a blocked or slow send
+    # fails fast with a clean error instead of hanging (and killing) the worker.
+    return int(os.environ.get("SMTP_TIMEOUT", "15"))
+
+
+def _send_via_brevo(to_email, code):
+    """Send the code through Brevo's HTTPS API (port 443).
+
+    Needed on hosts like Render that block all outbound SMTP ports. SMTP_FROM is
+    reused as the sender and must be a Brevo-verified sender address.
     """
-    host = os.environ.get("SMTP_HOST")
-    if not host:
-        print(f"[DEV] Email OTP for {to_email}: {code}")
-        return
+    sender = os.environ.get("SMTP_FROM") or os.environ.get("BREVO_SENDER")
+    payload = json.dumps(
+        {
+            "sender": {"email": sender, "name": "Login App"},
+            "to": [{"email": to_email}],
+            "subject": "Your login verification code",
+            "textContent": _otp_email_body(code),
+        }
+    ).encode("utf-8")
 
+    request_obj = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=payload,
+        headers={
+            "api-key": os.environ["BREVO_API_KEY"],
+            "content-type": "application/json",
+            "accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request_obj, timeout=_email_timeout()) as response:
+        response.read()
+
+
+def _send_via_smtp(to_email, code):
+    host = os.environ.get("SMTP_HOST")
     port = int(os.environ.get("SMTP_PORT", "587"))
     username = os.environ.get("SMTP_USER")
     password = os.environ.get("SMTP_PASSWORD")
@@ -197,17 +233,28 @@ def send_otp_email(to_email, code):
     message["Subject"] = "Your login verification code"
     message["From"] = sender
     message["To"] = to_email
-    message.set_content(
-        f"Your verification code is {code}.\n\n"
-        f"It expires in {EMAIL_OTP_TTL_SECONDS // 60} minutes. "
-        "If you didn't try to sign in, you can ignore this email."
-    )
+    message.set_content(_otp_email_body(code))
 
-    with smtplib.SMTP(host, port) as smtp:
+    with smtplib.SMTP(host, port, timeout=_email_timeout()) as smtp:
         smtp.starttls()
         if username and password:
             smtp.login(username, password)
         smtp.send_message(message)
+
+
+def send_otp_email(to_email, code):
+    """Deliver a one-time login code, choosing a transport by configuration:
+
+      1. Brevo HTTPS API  (BREVO_API_KEY set) — works where SMTP is blocked.
+      2. SMTP             (SMTP_HOST set)     — Gmail/Outlook/etc.
+      3. Console print                        — local-dev fallback.
+    """
+    if os.environ.get("BREVO_API_KEY"):
+        _send_via_brevo(to_email, code)
+    elif os.environ.get("SMTP_HOST"):
+        _send_via_smtp(to_email, code)
+    else:
+        print(f"[DEV] Email OTP for {to_email}: {code}")
 
 
 def start_email_otp(email):
@@ -309,7 +356,15 @@ def two_factor_choose():
             return redirect(url_for("two_factor_setup"))
 
         if method == "email":
-            start_email_otp(session["pending_2fa_email"])
+            try:
+                start_email_otp(session["pending_2fa_email"])
+            except Exception:
+                app.logger.exception("Failed to send email OTP")
+                return render_template(
+                    "two_factor_choose.html",
+                    error="We couldn't send the email right now. Please try again "
+                    "in a moment, or use your authenticator app.",
+                )
             return redirect(url_for("two_factor_email"))
 
         return render_template(
@@ -430,7 +485,11 @@ def two_factor_email_resend():
     if "pending_2fa_user_id" not in session:
         return redirect(url_for("login"))
 
-    start_email_otp(session["pending_2fa_email"])
+    try:
+        start_email_otp(session["pending_2fa_email"])
+    except Exception:
+        app.logger.exception("Failed to resend email OTP")
+
     return redirect(url_for("two_factor_email"))
 
 

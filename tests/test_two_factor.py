@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -90,6 +91,34 @@ class TwoFactorAuthTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(verify.headers["Location"], "/dashboard")
+
+    def test_send_otp_email_uses_brevo_http_api_when_key_set(self):
+        captured = {}
+
+        class FakeResponse:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request_obj, timeout=None):
+            captured["url"] = request_obj.full_url
+            captured["api_key"] = request_obj.get_header("Api-key")
+            captured["body"] = json.loads(request_obj.data.decode("utf-8"))
+            return FakeResponse()
+
+        env = {"BREVO_API_KEY": "test-key", "SMTP_FROM": "sender@example.com"}
+        with patch.dict(os.environ, env), patch("urllib.request.urlopen", fake_urlopen):
+            auth_module.send_otp_email("recipient@example.com", "123456")
+
+        self.assertEqual(captured["url"], "https://api.brevo.com/v3/smtp/email")
+        self.assertEqual(captured["api_key"], "test-key")
+        self.assertEqual(captured["body"]["to"][0]["email"], "recipient@example.com")
+        self.assertEqual(captured["body"]["sender"]["email"], "sender@example.com")
 
     def test_email_otp_rejects_wrong_code(self):
         auth_module.create_user("wrong@example.com", "password123")
