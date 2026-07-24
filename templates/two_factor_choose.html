@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Choose Verification Method</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+    <h2>Verify it's you</h2>
+    <p class="helper-text">Choose how you'd like to receive your verification code.</p>
+
+    <form method="POST">
+        <button type="submit" name="method" value="email" class="choice-btn">
+            📧&nbsp; Email me a code
+        </button>
+        <button type="submit" name="method" value="authenticator" class="choice-btn">
+            📱&nbsp; Use my authenticator app
+        </button>
+    </form>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+</div>
+
+</body>
+</html>

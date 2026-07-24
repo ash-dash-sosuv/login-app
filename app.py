@@ -1,11 +1,21 @@
 import base64
 import os
+import secrets
+import smtplib
 import socket
+import time
+from email.message import EmailMessage
 from io import BytesIO
 
 import pyotp
 import qrcode
+from dotenv import load_dotenv
 from flask import Flask, render_template, request, redirect, url_for, session
+
+# Load variables from a local .env file (SMTP creds, SECRET_KEY, ...) when
+# present. Real environment variables always take precedence, so this is a
+# no-op in production where the platform injects them directly.
+load_dotenv()
 from sqlalchemy import (
     Column,
     Integer,
@@ -140,11 +150,6 @@ def get_user_by_id(user_id):
     return _fetch_user(users.c.id == user_id)
 
 
-def set_two_factor_secret(user_id, secret):
-    with engine.begin() as conn:
-        conn.execute(update(users).where(users.c.id == user_id).values(two_factor_secret=secret))
-
-
 def update_two_factor_setup(user_id, secret):
     with engine.begin() as conn:
         conn.execute(
@@ -162,6 +167,69 @@ def build_qr_code(secret, email):
     image.save(buffered, format="PNG")
     encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
+
+
+EMAIL_OTP_TTL_SECONDS = 300  # email codes are valid for 5 minutes
+
+
+def generate_email_otp():
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def send_otp_email(to_email, code):
+    """Email a one-time login code.
+
+    Falls back to printing the code to the server console when SMTP isn't
+    configured, so local development works without a real email account. Set
+    SMTP_HOST (and friends) to send real email in production.
+    """
+    host = os.environ.get("SMTP_HOST")
+    if not host:
+        print(f"[DEV] Email OTP for {to_email}: {code}")
+        return
+
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    username = os.environ.get("SMTP_USER")
+    password = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM", username or "no-reply@login-app.local")
+
+    message = EmailMessage()
+    message["Subject"] = "Your login verification code"
+    message["From"] = sender
+    message["To"] = to_email
+    message.set_content(
+        f"Your verification code is {code}.\n\n"
+        f"It expires in {EMAIL_OTP_TTL_SECONDS // 60} minutes. "
+        "If you didn't try to sign in, you can ignore this email."
+    )
+
+    with smtplib.SMTP(host, port) as smtp:
+        smtp.starttls()
+        if username and password:
+            smtp.login(username, password)
+        smtp.send_message(message)
+
+
+def start_email_otp(email):
+    """Generate a fresh code, store it hashed with an expiry in the session, and
+    email it. The plaintext code never touches server-side storage."""
+    code = generate_email_otp()
+    session["email_otp_hash"] = generate_password_hash(code)
+    session["email_otp_expires"] = time.time() + EMAIL_OTP_TTL_SECONDS
+    send_otp_email(email, code)
+
+
+def verify_email_otp(code):
+    stored_hash = session.get("email_otp_hash")
+    expires = session.get("email_otp_expires", 0)
+    if not stored_hash or time.time() > expires:
+        return False
+    return check_password_hash(stored_hash, code)
+
+
+def clear_email_otp():
+    session.pop("email_otp_hash", None)
+    session.pop("email_otp_expires", None)
 
 
 def find_available_port(start_port=5000, max_tries=10):
@@ -200,7 +268,7 @@ def register():
             session["pending_2fa_user_id"] = user_id
             session["pending_2fa_email"] = email
             session["pending_2fa_secret"] = secret
-            return redirect(url_for("two_factor_setup"))
+            return redirect(url_for("two_factor_choose"))
         except IntegrityError:
             return render_template("register.html", error="Email already exists")
 
@@ -216,24 +284,39 @@ def login():
         user = get_user_by_email(email)
 
         if user and check_password_hash(user[2], password):
-            if user[3] == 1:
-                session["pending_2fa_user_id"] = user[0]
-                session["pending_2fa_email"] = user[1]
-                session["pending_2fa_secret"] = user[4]
-                return redirect(url_for("two_factor_verify"))
-
-            secret = user[4] or pyotp.random_base32()
-            if not user[4]:
-                set_two_factor_secret(user[0], secret)
-
             session["pending_2fa_user_id"] = user[0]
             session["pending_2fa_email"] = user[1]
-            session["pending_2fa_secret"] = secret
-            return redirect(url_for("two_factor_setup"))
+            session["pending_2fa_secret"] = user[4] or pyotp.random_base32()
+            return redirect(url_for("two_factor_choose"))
 
         return render_template("login.html", error="Invalid email or password")
 
     return render_template("login.html")
+
+
+@app.route("/two-factor/choose", methods=["GET", "POST"])
+def two_factor_choose():
+    if "pending_2fa_user_id" not in session:
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        method = request.form.get("method")
+
+        if method == "authenticator":
+            user = get_user_by_id(session["pending_2fa_user_id"])
+            if user and user[3] == 1:
+                return redirect(url_for("two_factor_verify"))
+            return redirect(url_for("two_factor_setup"))
+
+        if method == "email":
+            start_email_otp(session["pending_2fa_email"])
+            return redirect(url_for("two_factor_email"))
+
+        return render_template(
+            "two_factor_choose.html", error="Please choose a verification method."
+        )
+
+    return render_template("two_factor_choose.html")
 
 
 @app.route("/two-factor/setup", methods=["GET", "POST"])
@@ -309,6 +392,46 @@ def two_factor_verify():
         return render_template("two_factor_verify.html", error="Invalid code. Please try again.")
 
     return render_template("two_factor_verify.html")
+
+
+@app.route("/two-factor/email", methods=["GET", "POST"])
+def two_factor_email():
+    if "pending_2fa_user_id" not in session:
+        return redirect(url_for("login"))
+
+    user = get_user_by_id(session["pending_2fa_user_id"])
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        code = request.form.get("code", "").strip()
+
+        if verify_email_otp(code):
+            session["user_id"] = user[0]
+            session["email"] = user[1]
+            clear_email_otp()
+            session.pop("pending_2fa_user_id", None)
+            session.pop("pending_2fa_email", None)
+            session.pop("pending_2fa_secret", None)
+            return redirect(url_for("dashboard"))
+
+        return render_template(
+            "two_factor_email.html",
+            email=user[1],
+            error="Invalid or expired code. Please try again.",
+        )
+
+    return render_template("two_factor_email.html", email=user[1])
+
+
+@app.route("/two-factor/email/resend")
+def two_factor_email_resend():
+    if "pending_2fa_user_id" not in session:
+        return redirect(url_for("login"))
+
+    start_email_otp(session["pending_2fa_email"])
+    return redirect(url_for("two_factor_email"))
 
 
 @app.route("/dashboard")

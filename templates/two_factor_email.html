@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Enter Email Code</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+    <h2>Check your email</h2>
+    <p class="helper-text">We sent a 6-digit code to {{ email }}. It expires in 5 minutes.</p>
+
+    <form method="POST">
+        <input type="text" name="code" placeholder="6-digit code" required maxlength="6"
+               inputmode="numeric" autocomplete="one-time-code">
+        <button type="submit">Verify</button>
+    </form>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <a href="/two-factor/email/resend">Resend code</a>
+</div>
+
+</body>
+</html>

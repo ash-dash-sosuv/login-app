@@ -32,6 +32,30 @@ button {
     color: red;
 }
 
+.choice-btn {
+    text-align: left;
+    font-size: 15px;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+}
+
+.choice-btn:hover {
+    background: #f0f6ff;
+    border-color: #4a90d9;
+}
+
+.container a {
+    display: inline-block;
+    margin-top: 15px;
+    color: #4a90d9;
+    text-decoration: none;
+}
+
+.container a:hover {
+    text-decoration: underline;
+}
+
 .qr-code {
     width: 220px;
     height: 220px;
