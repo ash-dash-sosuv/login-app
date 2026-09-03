@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 import secrets
 import smtplib
@@ -10,7 +11,7 @@ from io import BytesIO
 import pyotp
 import qrcode
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, g, render_template, request, redirect, url_for, session
 
 # Load variables from a local .env file (SMTP creds, SECRET_KEY, ...) when
 # present. Real environment variables always take precedence, so this is a
@@ -30,12 +31,59 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.exc import IntegrityError
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import generate_password_hash, check_password_hash
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 # In production set SECRET_KEY to a long random value (e.g. `python -c "import secrets; print(secrets.token_hex(32))"`).
 # The fallback exists only so local development works out of the box.
 app.secret_key = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
+
+
+def _mask_email(email):
+    """Keep email identifiers useful in logs without exposing the full address."""
+    if not email or "@" not in email:
+        return "<missing>"
+    local, domain = email.split("@", 1)
+    return f"{local[:1]}***@{domain}"
+
+
+@app.before_request
+def log_request_start():
+    g.request_started_at = time.perf_counter()
+    logger.info("request_started method=%s path=%s", request.method, request.path)
+
+
+@app.after_request
+def log_request_end(response):
+    duration_ms = (time.perf_counter() - g.get("request_started_at", time.perf_counter())) * 1000
+    logger.info(
+        "request_completed method=%s path=%s status=%s duration_ms=%.1f",
+        request.method,
+        request.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
+
+
+@app.errorhandler(Exception)
+def log_unhandled_exception(error):
+    logger.exception(
+        "request_failed method=%s path=%s error_type=%s",
+        request.method,
+        request.path,
+        type(error).__name__,
+    )
+    if isinstance(error, HTTPException):
+        return error
+    return "Internal server error", 500
 
 
 metadata = MetaData()
@@ -59,9 +107,11 @@ def _resolve_database_url():
     """
     url = os.environ.get("DATABASE_URL")
     if url:
+        logger.info("database_configured backend=environment_url")
         return _normalize_database_url(url)
 
     sqlite_path = os.environ.get("DATABASE", "users.db")
+    logger.info("database_configured backend=sqlite path=%s", sqlite_path)
     return f"sqlite:///{sqlite_path}"
 
 
@@ -90,12 +140,15 @@ def configure_database(url):
     """(Re)point the app at a different database. Used by tests."""
     global engine
     engine = _build_engine(_normalize_database_url(url))
+    logger.info("database_reconfigured")
     return engine
 
 
 def init_db():
+    logger.info("database_initialization_started")
     metadata.create_all(engine)
     ensure_user_columns()
+    logger.info("database_initialization_completed")
 
 
 def ensure_user_columns():
@@ -105,11 +158,14 @@ def ensure_user_columns():
     with engine.begin() as conn:
         if "two_factor_enabled" not in existing:
             conn.execute(text("ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0"))
+            logger.info("database_schema_updated column=two_factor_enabled")
         if "two_factor_secret" not in existing:
             conn.execute(text("ALTER TABLE users ADD COLUMN two_factor_secret VARCHAR(64)"))
+            logger.info("database_schema_updated column=two_factor_secret")
 
 
 def create_user(email, password):
+    logger.info("user_creation_started email=%s", _mask_email(email))
     hashed_password = generate_password_hash(password)
     secret = pyotp.random_base32()
 
@@ -124,6 +180,7 @@ def create_user(email, password):
         )
         user_id = result.inserted_primary_key[0]
 
+    logger.info("user_creation_completed user_id=%s email=%s", user_id, _mask_email(email))
     return user_id, secret
 
 
@@ -157,6 +214,7 @@ def update_two_factor_setup(user_id, secret):
             .where(users.c.id == user_id)
             .values(two_factor_enabled=1, two_factor_secret=secret)
         )
+    logger.info("two_factor_setup_saved user_id=%s", user_id)
 
 
 def build_qr_code(secret, email):
@@ -185,6 +243,7 @@ def send_otp_email(to_email, code):
     """
     host = os.environ.get("SMTP_HOST")
     if not host:
+        logger.warning("otp_delivery_fallback email=%s", _mask_email(to_email))
         print(f"[DEV] Email OTP for {to_email}: {code}")
         return
 
@@ -208,6 +267,7 @@ def send_otp_email(to_email, code):
         if username and password:
             smtp.login(username, password)
         smtp.send_message(message)
+    logger.info("otp_email_sent email=%s host=%s", _mask_email(to_email), host)
 
 
 def start_email_otp(email):
@@ -217,14 +277,18 @@ def start_email_otp(email):
     session["email_otp_hash"] = generate_password_hash(code)
     session["email_otp_expires"] = time.time() + EMAIL_OTP_TTL_SECONDS
     send_otp_email(email, code)
+    logger.info("email_otp_started email=%s ttl_seconds=%s", _mask_email(email), EMAIL_OTP_TTL_SECONDS)
 
 
 def verify_email_otp(code):
     stored_hash = session.get("email_otp_hash")
     expires = session.get("email_otp_expires", 0)
     if not stored_hash or time.time() > expires:
+        logger.warning("email_otp_verification_failed reason=missing_or_expired")
         return False
-    return check_password_hash(stored_hash, code)
+    verified = check_password_hash(stored_hash, code)
+    logger.info("email_otp_verification_completed success=%s", verified)
+    return verified
 
 
 def clear_email_otp():
@@ -251,6 +315,7 @@ init_db()
 
 @app.route("/")
 def home():
+    logger.info("home_redirected")
     return redirect(url_for("login"))
 
 
@@ -261,6 +326,7 @@ def register():
         password = request.form.get("password", "")
 
         if not email or not password:
+            logger.warning("registration_rejected reason=missing_credentials")
             return render_template("register.html", error="Please enter an email and password")
 
         try:
@@ -268,8 +334,10 @@ def register():
             session["pending_2fa_user_id"] = user_id
             session["pending_2fa_email"] = email
             session["pending_2fa_secret"] = secret
+            logger.info("registration_accepted user_id=%s email=%s", user_id, _mask_email(email))
             return redirect(url_for("two_factor_choose"))
         except IntegrityError:
+            logger.warning("registration_rejected reason=email_exists email=%s", _mask_email(email))
             return render_template("register.html", error="Email already exists")
 
     return render_template("register.html")
@@ -287,8 +355,10 @@ def login():
             session["pending_2fa_user_id"] = user[0]
             session["pending_2fa_email"] = user[1]
             session["pending_2fa_secret"] = user[4] or pyotp.random_base32()
+            logger.info("login_password_verified user_id=%s email=%s", user[0], _mask_email(email))
             return redirect(url_for("two_factor_choose"))
 
+        logger.warning("login_rejected email=%s", _mask_email(email))
         return render_template("login.html", error="Invalid email or password")
 
     return render_template("login.html")
@@ -297,6 +367,7 @@ def login():
 @app.route("/two-factor/choose", methods=["GET", "POST"])
 def two_factor_choose():
     if "pending_2fa_user_id" not in session:
+        logger.warning("two_factor_choose_rejected reason=no_pending_user")
         return redirect(url_for("login"))
 
     if request.method == "POST":
@@ -305,13 +376,17 @@ def two_factor_choose():
         if method == "authenticator":
             user = get_user_by_id(session["pending_2fa_user_id"])
             if user and user[3] == 1:
+                logger.info("two_factor_method_selected method=authenticator user_id=%s", user[0])
                 return redirect(url_for("two_factor_verify"))
+            logger.info("two_factor_method_selected method=authenticator action=setup")
             return redirect(url_for("two_factor_setup"))
 
         if method == "email":
+            logger.info("two_factor_method_selected method=email")
             start_email_otp(session["pending_2fa_email"])
             return redirect(url_for("two_factor_email"))
 
+        logger.warning("two_factor_method_rejected reason=invalid_method")
         return render_template(
             "two_factor_choose.html", error="Please choose a verification method."
         )
@@ -322,6 +397,7 @@ def two_factor_choose():
 @app.route("/two-factor/setup", methods=["GET", "POST"])
 def two_factor_setup():
     if "pending_2fa_user_id" not in session:
+        logger.warning("two_factor_setup_rejected reason=no_pending_user")
         return redirect(url_for("login"))
 
     user_id = session["pending_2fa_user_id"]
@@ -332,6 +408,7 @@ def two_factor_setup():
         session["email"] = user[1]
         session.pop("pending_2fa_user_id", None)
         session.pop("pending_2fa_secret", None)
+        logger.info("two_factor_setup_skipped user_id=%s reason=already_enabled", user[0])
         return redirect(url_for("dashboard"))
 
     secret = session.get("pending_2fa_secret") or user[4]
@@ -347,8 +424,10 @@ def two_factor_setup():
             session["email"] = email
             session.pop("pending_2fa_user_id", None)
             session.pop("pending_2fa_secret", None)
+            logger.info("two_factor_setup_verified user_id=%s", user_id)
             return redirect(url_for("dashboard"))
 
+        logger.warning("two_factor_setup_rejected user_id=%s reason=invalid_code", user_id)
         return render_template(
             "two_factor_setup.html",
             email=email,
@@ -368,12 +447,14 @@ def two_factor_setup():
 @app.route("/two-factor/verify", methods=["GET", "POST"])
 def two_factor_verify():
     if "pending_2fa_user_id" not in session:
+        logger.warning("two_factor_verify_rejected reason=no_pending_user")
         return redirect(url_for("login"))
 
     user_id = session["pending_2fa_user_id"]
     user = get_user_by_id(user_id)
 
     if not user:
+        logger.error("two_factor_verify_failed reason=user_not_found user_id=%s", user_id)
         session.clear()
         return redirect(url_for("login"))
 
@@ -387,8 +468,10 @@ def two_factor_verify():
             session["email"] = user[1]
             session.pop("pending_2fa_user_id", None)
             session.pop("pending_2fa_secret", None)
+            logger.info("two_factor_verified user_id=%s", user_id)
             return redirect(url_for("dashboard"))
 
+        logger.warning("two_factor_verify_rejected user_id=%s reason=invalid_code", user_id)
         return render_template("two_factor_verify.html", error="Invalid code. Please try again.")
 
     return render_template("two_factor_verify.html")
@@ -397,10 +480,12 @@ def two_factor_verify():
 @app.route("/two-factor/email", methods=["GET", "POST"])
 def two_factor_email():
     if "pending_2fa_user_id" not in session:
+        logger.warning("two_factor_email_rejected reason=no_pending_user")
         return redirect(url_for("login"))
 
     user = get_user_by_id(session["pending_2fa_user_id"])
     if not user:
+        logger.error("two_factor_email_failed reason=user_not_found")
         session.clear()
         return redirect(url_for("login"))
 
@@ -414,8 +499,10 @@ def two_factor_email():
             session.pop("pending_2fa_user_id", None)
             session.pop("pending_2fa_email", None)
             session.pop("pending_2fa_secret", None)
+            logger.info("two_factor_email_verified user_id=%s", user[0])
             return redirect(url_for("dashboard"))
 
+        logger.warning("two_factor_email_rejected user_id=%s reason=invalid_or_expired_code", user[0])
         return render_template(
             "two_factor_email.html",
             email=user[1],
@@ -428,22 +515,27 @@ def two_factor_email():
 @app.route("/two-factor/email/resend")
 def two_factor_email_resend():
     if "pending_2fa_user_id" not in session:
+        logger.warning("otp_resend_rejected reason=no_pending_user")
         return redirect(url_for("login"))
 
     start_email_otp(session["pending_2fa_email"])
+    logger.info("otp_resent")
     return redirect(url_for("two_factor_email"))
 
 
 @app.route("/dashboard")
 def dashboard():
     if "user_id" not in session:
+        logger.warning("dashboard_rejected reason=not_authenticated")
         return redirect(url_for("login"))
 
+    logger.info("dashboard_viewed user_id=%s", session["user_id"])
     return render_template("dashboard.html", email=session["email"])
 
 
 @app.route("/logout")
 def logout():
+    logger.info("logout user_id=%s", session.get("user_id", "<anonymous>"))
     session.clear()
     return redirect(url_for("login"))
 
@@ -453,7 +545,8 @@ if __name__ == "__main__":
     selected_port = configured_port if os.environ.get("PORT") else find_available_port(configured_port)
 
     if not os.environ.get("PORT") and selected_port != configured_port:
-        print(f"Port {configured_port} is busy. Starting on port {selected_port} instead.")
+        logger.warning("port_in_use configured_port=%s selected_port=%s", configured_port, selected_port)
 
     debug = os.environ.get("FLASK_DEBUG", "1").lower() in ("1", "true", "yes")
+    logger.info("server_starting host=0.0.0.0 port=%s debug=%s", selected_port, debug)
     app.run(debug=debug, host="0.0.0.0", port=selected_port)
