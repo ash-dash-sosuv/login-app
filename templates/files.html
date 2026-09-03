@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Files{% endblock %}
+{% block page_title %}Files{% endblock %}
+
+{% block content %}
+<h1 class="page-heading">File Vault</h1>
+<p class="page-subheading">
+    {{ file_count }} file{{ '' if file_count == 1 else 's' }} stored &middot; {{ total_size }} used
+</p>
+
+<div class="card-grid">
+    <a href="{{ url_for('files_upload') }}" class="action-card action-card-large">
+        <div class="action-icon">&#8593;</div>
+        <div class="action-title">Upload Files</div>
+        <div class="action-desc">Drag and drop or browse to add new files to your vault.</div>
+    </a>
+    <a href="{{ url_for('files_download') }}" class="action-card action-card-large">
+        <div class="action-icon">&#8595;</div>
+        <div class="action-title">Download Files</div>
+        <div class="action-desc">Browse everything you've stored and save it to this device.</div>
+    </a>
+</div>
+{% endblock %}

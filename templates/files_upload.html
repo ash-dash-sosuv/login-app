@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Upload Files{% endblock %}
+{% block page_title %}Upload Files{% endblock %}
+
+{% block content %}
+<div class="breadcrumb"><a href="{{ url_for('files_home') }}">Files</a> &rarr; Upload</div>
+<h1 class="page-heading">Upload Files</h1>
+<p class="page-subheading">Files are saved to your vault immediately and appear in the list below.</p>
+
+<form id="upload-form" method="POST" enctype="multipart/form-data">
+    <div id="dropzone" class="dropzone">
+        <div class="dropzone-icon">&#8593;</div>
+        <div class="dropzone-title">Drag &amp; drop files here</div>
+        <div class="dropzone-sub">or click to browse from your computer</div>
+        <input type="file" name="files" id="file-input" multiple hidden>
+    </div>
+
+    <div id="upload-progress-wrap" class="progress-wrap" hidden>
+        <div class="progress-track"><div id="upload-progress-bar" class="progress-bar"></div></div>
+        <div id="upload-progress-label" class="progress-label">Uploading&hellip;</div>
+    </div>
+
+    <noscript><button type="submit" class="btn btn-primary">Upload</button></noscript>
+</form>
+
+<div class="panel">
+    <div class="panel-header">
+        <h2>Files in Your Vault</h2>
+        <span id="file-count-label" class="panel-meta">{{ files|length }} file{{ '' if files|length == 1 else 's' }}</span>
+    </div>
+
+    <table class="file-table" id="file-table">
+        <thead>
+            <tr><th>Name</th><th>Size</th><th>Last Modified</th></tr>
+        </thead>
+        <tbody id="file-table-body">
+            {% include "_file_rows.html" %}
+        </tbody>
+    </table>
+    <p id="empty-state" class="empty-state" {% if files %}hidden{% endif %}>No files yet. Drag one in above to get started.</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const form = document.getElementById("upload-form");
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("file-input");
+    const progressWrap = document.getElementById("upload-progress-wrap");
+    const progressBar = document.getElementById("upload-progress-bar");
+    const progressLabel = document.getElementById("upload-progress-label");
+    const tableBody = document.getElementById("file-table-body");
+    const emptyState = document.getElementById("empty-state");
+    const countLabel = document.getElementById("file-count-label");
+
+    // Chrome's default action for a drop that no script handles is to
+    // navigate the tab to open the dropped file. A drop that lands even a
+    // pixel outside the dropzone box — easy to do with multiple dragged
+    // files, since the cursor/ghost preview is bigger and less precise —
+    // would hit that default and blow away the page instead of doing
+    // nothing. Treat the whole page as a valid drop target so every drop is
+    // caught and handled the same way, regardless of exactly where it lands.
+    ["dragenter", "dragover"].forEach((evt) =>
+        document.addEventListener(evt, (e) => e.preventDefault())
+    );
+
+    document.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("dropzone-active");
+        if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+    });
+
+    dropzone.addEventListener("click", () => fileInput.click());
+
+    ["dragenter", "dragover"].forEach((evt) =>
+        dropzone.addEventListener(evt, (e) => {
+            e.preventDefault();
+            dropzone.classList.add("dropzone-active");
+        })
+    );
+
+    dropzone.addEventListener("dragleave", (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("dropzone-active");
+    });
+
+    fileInput.addEventListener("change", () => {
+        if (fileInput.files.length) uploadFiles(fileInput.files);
+    });
+
+    function escapeHtml(str) {
+        const div = document.createElement("div");
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function renderRows(files) {
+        countLabel.textContent = files.length + (files.length === 1 ? " file" : " files");
+        emptyState.hidden = files.length > 0;
+
+        tableBody.innerHTML = files
+            .map(
+                (f) => `
+                <tr>
+                    <td>${escapeHtml(f.name)}</td>
+                    <td>${escapeHtml(f.size_display)}</td>
+                    <td>${escapeHtml(f.modified)}</td>
+                </tr>`
+            )
+            .join("");
+    }
+
+    function uploadFiles(fileList) {
+        const formData = new FormData();
+        for (const file of fileList) formData.append("files", file);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", form.action || window.location.href, true);
+        xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+
+        progressWrap.hidden = false;
+        progressBar.style.width = "0%";
+        progressLabel.textContent = "Uploading…";
+
+        xhr.upload.addEventListener("progress", (e) => {
+            if (e.lengthComputable) {
+                const pct = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = pct + "%";
+                progressLabel.textContent = "Uploading… " + pct + "%";
+            }
+        });
+
+        xhr.onload = () => {
+            fileInput.value = "";
+            if (xhr.status >= 200 && xhr.status < 300) {
+                const data = JSON.parse(xhr.responseText);
+                progressLabel.textContent = "Upload complete";
+                progressBar.style.width = "100%";
+                renderRows(data.files);
+            } else {
+                progressLabel.textContent = "Upload failed. Please try again.";
+            }
+            setTimeout(() => { progressWrap.hidden = true; }, 1200);
+        };
+
+        xhr.onerror = () => {
+            progressLabel.textContent = "Upload failed. Please try again.";
+        };
+
+        xhr.send(formData);
+    }
+})();
+</script>
+{% endblock %}

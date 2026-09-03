@@ -4,13 +4,26 @@ import secrets
 import smtplib
 import socket
 import time
+from datetime import datetime
 from email.message import EmailMessage
+from functools import wraps
 from io import BytesIO
 
 import pyotp
 import qrcode
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import (
+    Flask,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
+from werkzeug.utils import secure_filename
 
 # Load variables from a local .env file (SMTP creds, SECRET_KEY, ...) when
 # present. Real environment variables always take precedence, so this is a
@@ -36,6 +49,12 @@ app = Flask(__name__)
 # In production set SECRET_KEY to a long random value (e.g. `python -c "import secrets; print(secrets.token_hex(32))"`).
 # The fallback exists only so local development works out of the box.
 app.secret_key = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB per upload request
+
+# Uploaded files live in a dedicated folder inside the user's Downloads
+# directory, so they're easy to find outside the app too.
+UPLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "upload_login_app")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 metadata = MetaData()
@@ -47,6 +66,7 @@ users = Table(
     Column("password", String(255), nullable=False),
     Column("two_factor_enabled", Integer, nullable=False, server_default=text("0")),
     Column("two_factor_secret", String(64)),
+    Column("email_2fa_enabled", Integer, nullable=False, server_default=text("1")),
 )
 
 
@@ -107,6 +127,8 @@ def ensure_user_columns():
             conn.execute(text("ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0"))
         if "two_factor_secret" not in existing:
             conn.execute(text("ALTER TABLE users ADD COLUMN two_factor_secret VARCHAR(64)"))
+        if "email_2fa_enabled" not in existing:
+            conn.execute(text("ALTER TABLE users ADD COLUMN email_2fa_enabled INTEGER NOT NULL DEFAULT 1"))
 
 
 def create_user(email, password):
@@ -120,6 +142,7 @@ def create_user(email, password):
                 password=hashed_password,
                 two_factor_enabled=0,
                 two_factor_secret=secret,
+                email_2fa_enabled=1,
             )
         )
         user_id = result.inserted_primary_key[0]
@@ -134,6 +157,7 @@ def _fetch_user(where_clause):
         users.c.password,
         users.c.two_factor_enabled,
         users.c.two_factor_secret,
+        users.c.email_2fa_enabled,
     ).where(where_clause)
 
     with engine.connect() as conn:
@@ -156,6 +180,35 @@ def update_two_factor_setup(user_id, secret):
             update(users)
             .where(users.c.id == user_id)
             .values(two_factor_enabled=1, two_factor_secret=secret)
+        )
+
+
+def update_password(user_id, new_password):
+    with engine.begin() as conn:
+        conn.execute(
+            update(users)
+            .where(users.c.id == user_id)
+            .values(password=generate_password_hash(new_password))
+        )
+
+
+def disable_authenticator(user_id):
+    """Turn off the authenticator method and roll the secret, so a
+    previously-scanned QR code can't be used to re-enable it silently."""
+    with engine.begin() as conn:
+        conn.execute(
+            update(users)
+            .where(users.c.id == user_id)
+            .values(two_factor_enabled=0, two_factor_secret=pyotp.random_base32())
+        )
+
+
+def set_email_2fa(user_id, enabled):
+    with engine.begin() as conn:
+        conn.execute(
+            update(users)
+            .where(users.c.id == user_id)
+            .values(email_2fa_enabled=1 if enabled else 0)
         )
 
 
@@ -232,6 +285,57 @@ def clear_email_otp():
     session.pop("email_otp_expires", None)
 
 
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def format_file_size(num_bytes):
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def list_uploaded_files():
+    """Files currently sitting in UPLOAD_DIR, newest first."""
+    entries = []
+    for name in os.listdir(UPLOAD_DIR):
+        path = os.path.join(UPLOAD_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        stat = os.stat(path)
+        entries.append(
+            {
+                "name": name,
+                "size": stat.st_size,
+                "size_display": format_file_size(stat.st_size),
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%b %d, %Y %H:%M"),
+                "modified_ts": stat.st_mtime,
+            }
+        )
+    entries.sort(key=lambda entry: entry["modified_ts"], reverse=True)
+    return entries
+
+
+def unique_filename(directory, filename):
+    """Avoid clobbering an existing file by appending ' (1)', ' (2)', ..."""
+    base, ext = os.path.splitext(filename)
+    candidate = filename
+    counter = 1
+    while os.path.exists(os.path.join(directory, candidate)):
+        candidate = f"{base} ({counter}){ext}"
+        counter += 1
+    return candidate
+
+
 def find_available_port(start_port=5000, max_tries=10):
     for port in range(start_port, start_port + max_tries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -299,24 +403,28 @@ def two_factor_choose():
     if "pending_2fa_user_id" not in session:
         return redirect(url_for("login"))
 
+    user = get_user_by_id(session["pending_2fa_user_id"])
+    email_enabled = bool(user[5]) if user else True
+
     if request.method == "POST":
         method = request.form.get("method")
 
         if method == "authenticator":
-            user = get_user_by_id(session["pending_2fa_user_id"])
             if user and user[3] == 1:
                 return redirect(url_for("two_factor_verify"))
             return redirect(url_for("two_factor_setup"))
 
-        if method == "email":
+        if method == "email" and email_enabled:
             start_email_otp(session["pending_2fa_email"])
             return redirect(url_for("two_factor_email"))
 
         return render_template(
-            "two_factor_choose.html", error="Please choose a verification method."
+            "two_factor_choose.html",
+            email_enabled=email_enabled,
+            error="Please choose a verification method.",
         )
 
-    return render_template("two_factor_choose.html")
+    return render_template("two_factor_choose.html", email_enabled=email_enabled)
 
 
 @app.route("/two-factor/setup", methods=["GET", "POST"])
@@ -435,11 +543,201 @@ def two_factor_email_resend():
 
 
 @app.route("/dashboard")
+@login_required
 def dashboard():
-    if "user_id" not in session:
+    files = list_uploaded_files()
+    return render_template(
+        "dashboard.html",
+        email=session["email"],
+        file_count=len(files),
+        total_size=format_file_size(sum(f["size"] for f in files)),
+        recent_files=files[:5],
+    )
+
+
+@app.route("/files")
+@login_required
+def files_home():
+    files = list_uploaded_files()
+    return render_template(
+        "files.html",
+        email=session["email"],
+        file_count=len(files),
+        total_size=format_file_size(sum(f["size"] for f in files)),
+    )
+
+
+@app.route("/files/upload", methods=["GET", "POST"])
+@login_required
+def files_upload():
+    if request.method == "POST":
+        uploaded = [f for f in request.files.getlist("files") if f and f.filename]
+        saved, skipped = [], []
+
+        for file in uploaded:
+            filename = secure_filename(file.filename)
+            if not filename:
+                skipped.append(file.filename)
+                continue
+            filename = unique_filename(UPLOAD_DIR, filename)
+            file.save(os.path.join(UPLOAD_DIR, filename))
+            saved.append(filename)
+
+        is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        if is_ajax:
+            return jsonify(saved=saved, skipped=skipped, files=list_uploaded_files())
+
+        if saved:
+            flash(f"Uploaded {len(saved)} file(s) successfully.", "success")
+        if skipped:
+            flash(f"Skipped {len(skipped)} file(s) with an invalid name.", "error")
+        return redirect(url_for("files_upload"))
+
+    return render_template("files_upload.html", email=session["email"], files=list_uploaded_files())
+
+
+@app.route("/files/download")
+@login_required
+def files_download():
+    return render_template("files_download.html", email=session["email"], files=list_uploaded_files())
+
+
+@app.route("/files/download/<path:filename>")
+@login_required
+def files_download_file(filename):
+    safe_name = os.path.basename(filename)
+    if safe_name != filename or not os.path.isfile(os.path.join(UPLOAD_DIR, safe_name)):
+        flash("That file could not be found.", "error")
+        return redirect(url_for("files_download"))
+
+    return send_from_directory(UPLOAD_DIR, safe_name, as_attachment=True)
+
+
+@app.route("/about")
+@login_required
+def about():
+    return render_template("about.html", email=session["email"])
+
+
+@app.route("/contact", methods=["GET", "POST"])
+@login_required
+def contact():
+    if request.method == "POST":
+        flash("Thanks for reaching out — our team will get back to you shortly.", "success")
+        return redirect(url_for("contact"))
+
+    return render_template("contact.html", email=session["email"])
+
+
+@app.route("/profile")
+@login_required
+def profile():
+    user = get_user_by_id(session["user_id"])
+    files = list_uploaded_files()
+    return render_template(
+        "profile.html",
+        email=session["email"],
+        two_factor_enabled=bool(user[3]) if user else False,
+        email_2fa_enabled=bool(user[5]) if user else False,
+        file_count=len(files),
+        total_size=format_file_size(sum(f["size"] for f in files)),
+    )
+
+
+@app.route("/profile/change-password", methods=["POST"])
+@login_required
+def change_password():
+    user = get_user_by_id(session["user_id"])
+    current_password = request.form.get("current_password", "")
+    new_password = request.form.get("new_password", "")
+    confirm_password = request.form.get("confirm_password", "")
+
+    if not user or not check_password_hash(user[2], current_password):
+        flash("Current password is incorrect.", "error")
+    elif len(new_password) < 8:
+        flash("New password must be at least 8 characters.", "error")
+    elif new_password != confirm_password:
+        flash("New password and confirmation do not match.", "error")
+    else:
+        update_password(user[0], new_password)
+        flash("Password updated successfully.", "success")
+
+    return redirect(url_for("profile"))
+
+
+@app.route("/profile/2fa/authenticator/setup", methods=["GET", "POST"])
+@login_required
+def profile_authenticator_setup():
+    user = get_user_by_id(session["user_id"])
+    if not user:
         return redirect(url_for("login"))
 
-    return render_template("dashboard.html", email=session["email"])
+    if user[3] == 1:
+        return redirect(url_for("profile"))
+
+    secret = user[4] or pyotp.random_base32()
+    email = user[1]
+
+    if request.method == "POST":
+        code = request.form.get("code", "").strip()
+        totp = pyotp.TOTP(secret)
+
+        if totp.verify(code, valid_window=1):
+            update_two_factor_setup(user[0], secret)
+            flash("Authenticator app enabled.", "success")
+            return redirect(url_for("profile"))
+
+        return render_template(
+            "profile_authenticator_setup.html",
+            email=email,
+            qr_code=build_qr_code(secret, email),
+            secret=secret,
+            error="Invalid code. Please try again.",
+        )
+
+    return render_template(
+        "profile_authenticator_setup.html",
+        email=email,
+        qr_code=build_qr_code(secret, email),
+        secret=secret,
+    )
+
+
+@app.route("/profile/2fa/authenticator/disable", methods=["POST"])
+@login_required
+def profile_authenticator_disable():
+    user = get_user_by_id(session["user_id"])
+    if not user:
+        return redirect(url_for("login"))
+
+    if not user[5]:
+        flash("You need at least one two-factor method enabled. Enable email verification first.", "error")
+        return redirect(url_for("profile"))
+
+    disable_authenticator(user[0])
+    flash("Authenticator app disabled.", "success")
+    return redirect(url_for("profile"))
+
+
+@app.route("/profile/2fa/email/enable", methods=["POST"])
+@login_required
+def profile_email_2fa_enable():
+    set_email_2fa(session["user_id"], True)
+    flash("Email verification enabled.", "success")
+    return redirect(url_for("profile"))
+
+
+@app.route("/profile/2fa/email/disable", methods=["POST"])
+@login_required
+def profile_email_2fa_disable():
+    user = get_user_by_id(session["user_id"])
+    if not user or user[3] != 1:
+        flash("You need at least one two-factor method enabled. Set up an authenticator app first.", "error")
+        return redirect(url_for("profile"))
+
+    set_email_2fa(session["user_id"], False)
+    flash("Email verification disabled.", "success")
+    return redirect(url_for("profile"))
 
 
 @app.route("/logout")

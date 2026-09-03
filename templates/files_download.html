@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Download Files{% endblock %}
+{% block page_title %}Download Files{% endblock %}
+
+{% block content %}
+<div class="breadcrumb"><a href="{{ url_for('files_home') }}">Files</a> &rarr; Download</div>
+<h1 class="page-heading">Download Files</h1>
+<p class="page-subheading">Files download using your browser's normal download flow.</p>
+
+{% if files %}
+<div class="search-row">
+    <input type="text" id="file-search" class="search-input" placeholder="Search files&hellip;">
+</div>
+
+<div class="panel">
+    <table class="file-table" id="download-table">
+        <thead>
+            <tr><th>Name</th><th>Size</th><th>Last Modified</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for f in files %}
+            <tr class="file-row">
+                <td class="file-name-cell">{{ f.name }}</td>
+                <td>{{ f.size_display }}</td>
+                <td>{{ f.modified }}</td>
+                <td class="file-action-cell">
+                    <a href="{{ url_for('files_download_file', filename=f.name) }}" class="btn btn-small">Download</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="panel">
+    <p class="empty-state">Your vault is empty. <a href="{{ url_for('files_upload') }}">Upload a file</a> to see it here.</p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const search = document.getElementById("file-search");
+    if (!search) return;
+    search.addEventListener("input", () => {
+        const term = search.value.trim().toLowerCase();
+        document.querySelectorAll("#download-table .file-row").forEach((row) => {
+            const name = row.querySelector(".file-name-cell").textContent.toLowerCase();
+            row.style.display = name.includes(term) ? "" : "none";
+        });
+    });
+})();
+</script>
+{% endblock %}

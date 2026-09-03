@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Set Up Authenticator{% endblock %}
+{% block page_title %}Set Up Authenticator{% endblock %}
+
+{% block content %}
+<div class="breadcrumb"><a href="{{ url_for('profile') }}">Profile</a> &rarr; Set Up Authenticator</div>
+<h1 class="page-heading">Set Up Authenticator App</h1>
+<p class="page-subheading">Scan this QR code with Google Authenticator or another TOTP app.</p>
+
+<div class="panel">
+    <img class="qr-code" src="{{ qr_code }}" alt="Two-factor QR code">
+
+    <p class="helper-text">The code refreshes every 30 seconds. Enter the current 6-digit code below to finish setup.</p>
+
+    <form method="POST" class="contact-form">
+        <input type="text" name="code" placeholder="6-digit code" required maxlength="6">
+        <button type="submit" class="btn btn-primary">Verify and Enable</button>
+    </form>
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+
+    <div class="secret-box">
+        <strong>Manual secret:</strong> {{ secret }}
+    </div>
+</div>
+{% endblock %}

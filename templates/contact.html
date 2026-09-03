@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Contact{% endblock %}
+{% block page_title %}Contact{% endblock %}
+
+{% block content %}
+<h1 class="page-heading">Get in Touch</h1>
+<p class="page-subheading">Questions about your account or your files? We're here to help.</p>
+
+<div class="contact-layout">
+    <div class="panel">
+        <h2>Send a Message</h2>
+        <form method="POST" class="contact-form">
+            <label class="form-label">Subject</label>
+            <input type="text" name="subject" placeholder="How can we help?" required>
+
+            <label class="form-label">Message</label>
+            <textarea name="message" rows="5" placeholder="Tell us more..." required></textarea>
+
+            <button type="submit" class="btn btn-primary">Send Message</button>
+        </form>
+    </div>
+
+    <div class="panel contact-info">
+        <h2>Contact Details</h2>
+        <div class="contact-line"><span class="contact-label">Support Email</span>support@vaultly.app</div>
+        <div class="contact-line"><span class="contact-label">Phone</span>+1 (555) 010-0199</div>
+        <div class="contact-line"><span class="contact-label">Hours</span>Mon&ndash;Fri, 9am&ndash;6pm</div>
+    </div>
+</div>
+{% endblock %}

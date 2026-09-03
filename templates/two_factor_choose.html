@@ -11,9 +11,11 @@
     <p class="helper-text">Choose how you'd like to receive your verification code.</p>
 
     <form method="POST">
+        {% if email_enabled %}
         <button type="submit" name="method" value="email" class="choice-btn">
             📧&nbsp; Email me a code
         </button>
+        {% endif %}
         <button type="submit" name="method" value="authenticator" class="choice-btn">
             📱&nbsp; Use my authenticator app
         </button>

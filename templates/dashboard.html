@@ -1,22 +1,67 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
 
-<div class="container">
-    <h1>🎉 Congratulations!</h1>
+{% block content %}
+<h1 class="page-heading">Welcome back</h1>
+<p class="page-subheading">Here's what's happening with your vault today.</p>
 
-    <h3>You are logged in.</h3>
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="stat-label">Files Stored</div>
+        <div class="stat-value">{{ file_count }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Storage Used</div>
+        <div class="stat-value">{{ total_size }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Account Security</div>
+        <div class="stat-value stat-value-small">Two-Factor Active</div>
+    </div>
+</div>
 
-    <p>Welcome {{ email }}</p>
-
-    <a href="/logout">
-        <button>Logout</button>
+<div class="card-grid">
+    <a href="{{ url_for('files_upload') }}" class="action-card">
+        <div class="action-icon">&#8593;</div>
+        <div class="action-title">Upload Files</div>
+        <div class="action-desc">Add documents and statements to your secure vault.</div>
+    </a>
+    <a href="{{ url_for('files_download') }}" class="action-card">
+        <div class="action-icon">&#8595;</div>
+        <div class="action-title">Download Files</div>
+        <div class="action-desc">Retrieve anything you've stored, straight to your device.</div>
+    </a>
+    <a href="{{ url_for('profile') }}" class="action-card">
+        <div class="action-icon">&#9881;</div>
+        <div class="action-title">Manage Profile</div>
+        <div class="action-desc">Review your account and security details.</div>
     </a>
 </div>
 
-</body>
-</html>
+<div class="panel">
+    <div class="panel-header">
+        <h2>Recent Files</h2>
+        <a href="{{ url_for('files_home') }}" class="panel-link">View all &rarr;</a>
+    </div>
+
+    {% if recent_files %}
+    <table class="file-table">
+        <thead>
+            <tr><th>Name</th><th>Size</th><th>Last Modified</th></tr>
+        </thead>
+        <tbody>
+            {% for f in recent_files %}
+            <tr>
+                <td>{{ f.name }}</td>
+                <td>{{ f.size_display }}</td>
+                <td>{{ f.modified }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">No files yet. <a href="{{ url_for('files_upload') }}">Upload your first file</a>.</p>
+    {% endif %}
+</div>
+{% endblock %}
