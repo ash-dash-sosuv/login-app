@@ -144,7 +144,16 @@ def ensure_user_columns():
         if "email_2fa_enabled" not in existing:
             conn.execute(text("ALTER TABLE users ADD COLUMN email_2fa_enabled INTEGER NOT NULL DEFAULT 1"))
             logger.info("database_schema_updated column=email_2fa_enabled")
-
+def _mask_email(email):
+    """Mask the local part of an email address for logging."""
+    if "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    if len(local) <= 2:
+        masked_local = "*" * len(local)
+    else:
+        masked_local = local[0] + "*" * (len(local) - 2) + local[-1]
+    return f"{masked_local}@{domain}"
 
 def create_user(email, password):
     logger.info("user_creation_started email=%s", _mask_email(email))
