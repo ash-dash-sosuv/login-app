@@ -1,6 +1,7 @@
 import base64
 import logging
 import os
+import re
 import secrets
 import smtplib
 import socket
@@ -74,6 +75,8 @@ users = Table(
     Column("two_factor_enabled", Integer, nullable=False, server_default=text("0")),
     Column("two_factor_secret", String(64)),
     Column("email_2fa_enabled", Integer, nullable=False, server_default=text("1")),
+    Column("phone_number", String(20)),
+    Column("sms_2fa_enabled", Integer, nullable=False, server_default=text("0")),
 )
 
 
@@ -144,6 +147,14 @@ def ensure_user_columns():
         if "email_2fa_enabled" not in existing:
             conn.execute(text("ALTER TABLE users ADD COLUMN email_2fa_enabled INTEGER NOT NULL DEFAULT 1"))
             logger.info("database_schema_updated column=email_2fa_enabled")
+        if "phone_number" not in existing:
+            conn.execute(text("ALTER TABLE users ADD COLUMN phone_number VARCHAR(20)"))
+            logger.info("database_schema_updated column=phone_number")
+        if "sms_2fa_enabled" not in existing:
+            conn.execute(text("ALTER TABLE users ADD COLUMN sms_2fa_enabled INTEGER NOT NULL DEFAULT 0"))
+            logger.info("database_schema_updated column=sms_2fa_enabled")
+
+
 def _mask_email(email):
     """Mask the local part of an email address for logging."""
     if "@" not in email:
@@ -154,6 +165,14 @@ def _mask_email(email):
     else:
         masked_local = local[0] + "*" * (len(local) - 2) + local[-1]
     return f"{masked_local}@{domain}"
+
+
+def _mask_phone(phone):
+    """Show only the last two digits of a phone number, for logs and UI."""
+    if not phone:
+        return phone
+    return "*" * (len(phone) - 2) + phone[-2:]
+
 
 def create_user(email, password):
     logger.info("user_creation_started email=%s", _mask_email(email))
@@ -184,6 +203,8 @@ def _fetch_user(where_clause):
         users.c.two_factor_enabled,
         users.c.two_factor_secret,
         users.c.email_2fa_enabled,
+        users.c.phone_number,
+        users.c.sms_2fa_enabled,
     ).where(where_clause)
 
     with engine.connect() as conn:
@@ -238,6 +259,23 @@ def set_email_2fa(user_id, enabled):
             .where(users.c.id == user_id)
             .values(email_2fa_enabled=1 if enabled else 0)
         )
+
+
+def set_sms_2fa(user_id, phone_number):
+    """Enable SMS codes for a verified phone number, or disable them (and
+    forget the number) when phone_number is None."""
+    with engine.begin() as conn:
+        conn.execute(
+            update(users)
+            .where(users.c.id == user_id)
+            .values(phone_number=phone_number, sms_2fa_enabled=1 if phone_number else 0)
+        )
+    logger.info("sms_2fa_updated user_id=%s enabled=%s", user_id, bool(phone_number))
+
+
+def enabled_method_count(user):
+    """How many 2FA methods a user row has switched on."""
+    return sum(1 for flag in (user[3], user[5], user[7]) if flag)
 
 
 def build_qr_code(secret, email):
@@ -317,6 +355,124 @@ def verify_email_otp(code):
 def clear_email_otp():
     session.pop("email_otp_hash", None)
     session.pop("email_otp_expires", None)
+
+
+E164_PATTERN = re.compile(r"^\+[1-9]\d{7,14}$")
+SMS_OTP_TTL_SECONDS = 600  # matches Twilio Verify's default code lifetime
+
+
+class SmsDeliveryError(Exception):
+    """Raised when Twilio refuses to send a verification SMS."""
+
+
+def normalize_phone_number(raw):
+    """Strip formatting characters and return an E.164 number (e.g.
+    +14155552671), or None if the input isn't one. Twilio requires E.164."""
+    phone = re.sub(r"[\s\-().]", "", raw or "")
+    return phone if E164_PATTERN.match(phone) else None
+
+
+def _twilio_verify_service():
+    """Return the Twilio Verify service, or None when Twilio isn't configured.
+
+    Prefers an API Key (TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET), which can
+    be restricted and revoked on its own; falls back to the account Auth Token.
+    """
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    service_sid = os.environ.get("TWILIO_VERIFY_SERVICE_SID")
+    api_key_sid = os.environ.get("TWILIO_API_KEY_SID")
+    api_key_secret = os.environ.get("TWILIO_API_KEY_SECRET")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+    if not (account_sid and service_sid):
+        return None
+
+    from twilio.rest import Client
+
+    if api_key_sid and api_key_secret:
+        credentials = {"TWILIO_API_KEY_SID": api_key_sid, "TWILIO_API_KEY_SECRET": api_key_secret}
+        client_args = (api_key_sid, api_key_secret, account_sid)
+    elif auth_token:
+        credentials = {"TWILIO_AUTH_TOKEN": auth_token}
+        client_args = (account_sid, auth_token)
+    else:
+        return None
+
+    # Twilio credentials are plain ASCII letters and digits. Anything else is a
+    # copy/paste or keyboard-layout mistake, and would otherwise crash deep in
+    # the HTTP client while building the Authorization header.
+    credentials.update(TWILIO_ACCOUNT_SID=account_sid, TWILIO_VERIFY_SERVICE_SID=service_sid)
+    for name, value in credentials.items():
+        if not (value.isascii() and value.isalnum()):
+            logger.error("twilio_config_invalid variable=%s reason=non_alphanumeric_characters", name)
+            raise SmsDeliveryError(f"{name} contains invalid characters")
+
+    return Client(*client_args).verify.v2.services(service_sid)
+
+
+def start_sms_otp(phone):
+    """Text a one-time code to `phone` via Twilio Verify.
+
+    Twilio generates, delivers, and later checks the code, so nothing is stored
+    here. When Twilio isn't configured, a local code is generated and printed to
+    the server console instead (hashed in the session, like email OTP), so local
+    development works without a Twilio account.
+    """
+    service = _twilio_verify_service()
+    if service is None:
+        code = generate_email_otp()
+        session["sms_otp_hash"] = generate_password_hash(code)
+        session["sms_otp_expires"] = time.time() + SMS_OTP_TTL_SECONDS
+        logger.warning("otp_delivery_fallback phone=%s", _mask_phone(phone))
+        print(f"[DEV] SMS OTP for {phone}: {code}")
+        return
+
+    from twilio.base.exceptions import TwilioRestException
+
+    try:
+        service.verifications.create(to=phone, channel="sms")
+    except TwilioRestException as exc:
+        logger.error("sms_otp_send_failed phone=%s status=%s code=%s", _mask_phone(phone), exc.status, exc.code)
+        raise SmsDeliveryError(str(exc.msg)) from exc
+    logger.info("sms_otp_started phone=%s", _mask_phone(phone))
+
+
+def verify_sms_otp(phone, code):
+    if not code.isdigit():
+        logger.warning("sms_otp_verification_failed reason=malformed_code")
+        return False
+
+    try:
+        service = _twilio_verify_service()
+    except SmsDeliveryError:
+        return False
+    if service is None:
+        stored_hash = session.get("sms_otp_hash")
+        expires = session.get("sms_otp_expires", 0)
+        if not stored_hash or time.time() > expires:
+            logger.warning("sms_otp_verification_failed reason=missing_or_expired")
+            return False
+        verified = check_password_hash(stored_hash, code)
+        logger.info("sms_otp_verification_completed success=%s", verified)
+        return verified
+
+    from twilio.base.exceptions import TwilioRestException
+
+    try:
+        check = service.verification_checks.create(to=phone, code=code)
+    except TwilioRestException as exc:
+        # Twilio answers 404 once a verification has expired, been approved,
+        # or exceeded its attempt limit.
+        logger.warning("sms_otp_verification_failed status=%s code=%s", exc.status, exc.code)
+        return False
+
+    verified = check.status == "approved"
+    logger.info("sms_otp_verification_completed success=%s", verified)
+    return verified
+
+
+def clear_sms_otp():
+    session.pop("sms_otp_hash", None)
+    session.pop("sms_otp_expires", None)
 
 
 def login_required(view):
@@ -446,6 +602,12 @@ def two_factor_choose():
 
     user = get_user_by_id(session["pending_2fa_user_id"])
     email_enabled = bool(user[5]) if user else True
+    sms_enabled = bool(user and user[7] and user[6])
+    choose_context = {
+        "email_enabled": email_enabled,
+        "sms_enabled": sms_enabled,
+        "masked_phone": _mask_phone(user[6]) if sms_enabled else None,
+    }
 
     if request.method == "POST":
         method = request.form.get("method")
@@ -462,14 +624,30 @@ def two_factor_choose():
             start_email_otp(session["pending_2fa_email"])
             return redirect(url_for("two_factor_email"))
 
+        if method == "sms" and user:
+            if not sms_enabled:
+                # No verified phone yet: ask for one on the SMS page.
+                logger.info("two_factor_method_selected method=sms action=enroll user_id=%s", user[0])
+                return redirect(url_for("two_factor_sms"))
+            logger.info("two_factor_method_selected method=sms user_id=%s", user[0])
+            try:
+                start_sms_otp(user[6])
+            except SmsDeliveryError:
+                return render_template(
+                    "two_factor_choose.html",
+                    **choose_context,
+                    error="We couldn't send a text message right now. Please try another method.",
+                )
+            return redirect(url_for("two_factor_sms"))
+
         logger.warning("two_factor_method_rejected reason=invalid_method")
         return render_template(
             "two_factor_choose.html",
-            email_enabled=email_enabled,
+            **choose_context,
             error="Please choose a verification method.",
         )
 
-    return render_template("two_factor_choose.html", email_enabled=email_enabled)
+    return render_template("two_factor_choose.html", **choose_context)
 
 
 @app.route("/two-factor/setup", methods=["GET", "POST"])
@@ -601,6 +779,98 @@ def two_factor_email_resend():
     return redirect(url_for("two_factor_email"))
 
 
+@app.route("/two-factor/sms", methods=["GET", "POST"])
+def two_factor_sms():
+    if "pending_2fa_user_id" not in session:
+        logger.warning("two_factor_sms_rejected reason=no_pending_user")
+        return redirect(url_for("login"))
+
+    user = get_user_by_id(session["pending_2fa_user_id"])
+    if not user:
+        logger.error("two_factor_sms_failed reason=user_not_found")
+        session.clear()
+        return redirect(url_for("login"))
+
+    # Users with a verified phone get a code straight away (sent from the
+    # choose page). Users without one first enter a number here; it's saved to
+    # their account only after they prove they own it by entering the code.
+    enrolled_phone = user[6] if user[7] else None
+    target_phone = enrolled_phone or session.get("pending_sms_phone")
+
+    def render(error=None):
+        return render_template(
+            "two_factor_sms.html",
+            needs_phone=target_phone is None,
+            masked_phone=_mask_phone(target_phone) if target_phone else None,
+            can_change_number=enrolled_phone is None,
+            error=error,
+        )
+
+    if request.method == "POST":
+        step = request.form.get("step", "verify")
+
+        if step == "send" and not enrolled_phone:
+            phone = normalize_phone_number(request.form.get("phone", ""))
+            if not phone:
+                return render("Enter your number in international format, e.g. +14155552671.")
+            try:
+                start_sms_otp(phone)
+            except SmsDeliveryError:
+                return render("We couldn't send a text to that number. Check it and try again.")
+            session["pending_sms_phone"] = phone
+            logger.info("two_factor_sms_enroll_code_sent user_id=%s phone=%s", user[0], _mask_phone(phone))
+            return redirect(url_for("two_factor_sms"))
+
+        if step == "restart" and not enrolled_phone:
+            clear_sms_otp()
+            session.pop("pending_sms_phone", None)
+            return redirect(url_for("two_factor_sms"))
+
+        if step == "verify" and target_phone:
+            code = request.form.get("code", "").strip()
+
+            if verify_sms_otp(target_phone, code):
+                if not enrolled_phone:
+                    set_sms_2fa(user[0], target_phone)
+                session["user_id"] = user[0]
+                session["email"] = user[1]
+                clear_sms_otp()
+                session.pop("pending_sms_phone", None)
+                session.pop("pending_2fa_user_id", None)
+                session.pop("pending_2fa_email", None)
+                session.pop("pending_2fa_secret", None)
+                logger.info("two_factor_sms_verified user_id=%s enrolled=%s", user[0], not enrolled_phone)
+                return redirect(url_for("dashboard"))
+
+            logger.warning("two_factor_sms_rejected user_id=%s reason=invalid_or_expired_code", user[0])
+            return render("Invalid or expired code. Please try again.")
+
+    return render()
+
+
+@app.route("/two-factor/sms/resend")
+def two_factor_sms_resend():
+    if "pending_2fa_user_id" not in session:
+        logger.warning("sms_otp_resend_rejected reason=no_pending_user")
+        return redirect(url_for("login"))
+
+    user = get_user_by_id(session["pending_2fa_user_id"])
+    if not user:
+        return redirect(url_for("login"))
+
+    phone = (user[6] if user[7] else None) or session.get("pending_sms_phone")
+    if not phone:
+        return redirect(url_for("two_factor_sms"))
+
+    try:
+        start_sms_otp(phone)
+    except SmsDeliveryError:
+        flash("We couldn't send a new code right now. Please try again shortly.", "error")
+        return redirect(url_for("two_factor_sms"))
+    logger.info("sms_otp_resent user_id=%s", user[0])
+    return redirect(url_for("two_factor_sms"))
+
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -698,6 +968,8 @@ def profile():
         email=session["email"],
         two_factor_enabled=bool(user[3]) if user else False,
         email_2fa_enabled=bool(user[5]) if user else False,
+        sms_2fa_enabled=bool(user and user[7] and user[6]),
+        masked_phone=_mask_phone(user[6]) if user and user[6] else None,
         file_count=len(files),
         total_size=format_file_size(sum(f["size"] for f in files)),
     )
@@ -769,8 +1041,8 @@ def profile_authenticator_disable():
     if not user:
         return redirect(url_for("login"))
 
-    if not user[5]:
-        flash("You need at least one two-factor method enabled. Enable email verification first.", "error")
+    if enabled_method_count(user) < 2:
+        flash("You need at least one two-factor method enabled. Enable email or SMS verification first.", "error")
         return redirect(url_for("profile"))
 
     disable_authenticator(user[0])
@@ -790,12 +1062,82 @@ def profile_email_2fa_enable():
 @login_required
 def profile_email_2fa_disable():
     user = get_user_by_id(session["user_id"])
-    if not user or user[3] != 1:
-        flash("You need at least one two-factor method enabled. Set up an authenticator app first.", "error")
+    if not user or enabled_method_count(user) < 2:
+        flash("You need at least one two-factor method enabled. Set up an authenticator app or SMS first.", "error")
         return redirect(url_for("profile"))
 
     set_email_2fa(session["user_id"], False)
     flash("Email verification disabled.", "success")
+    return redirect(url_for("profile"))
+
+
+@app.route("/profile/2fa/sms/setup", methods=["GET", "POST"])
+@login_required
+def profile_sms_setup():
+    """Two steps on one page: enter a phone number (we text it a code), then
+    enter that code to prove ownership before SMS is enabled."""
+    user = get_user_by_id(session["user_id"])
+    if not user:
+        return redirect(url_for("login"))
+
+    pending_phone = session.get("sms_setup_phone")
+
+    if request.method == "POST":
+        step = request.form.get("step")
+
+        if step == "send":
+            phone = normalize_phone_number(request.form.get("phone", ""))
+            if not phone:
+                return render_template(
+                    "profile_sms_setup.html",
+                    email=user[1],
+                    error="Enter your number in international format, e.g. +14155552671.",
+                )
+            try:
+                start_sms_otp(phone)
+            except SmsDeliveryError:
+                return render_template(
+                    "profile_sms_setup.html",
+                    email=user[1],
+                    error="We couldn't send a text to that number. Check it and try again.",
+                )
+            session["sms_setup_phone"] = phone
+            return redirect(url_for("profile_sms_setup"))
+
+        if step == "verify" and pending_phone:
+            code = request.form.get("code", "").strip()
+            if verify_sms_otp(pending_phone, code):
+                set_sms_2fa(user[0], pending_phone)
+                clear_sms_otp()
+                session.pop("sms_setup_phone", None)
+                flash("SMS verification enabled.", "success")
+                return redirect(url_for("profile"))
+
+            return render_template(
+                "profile_sms_setup.html",
+                email=user[1],
+                pending_phone=pending_phone,
+                error="Invalid or expired code. Please try again.",
+            )
+
+        if step == "restart":
+            clear_sms_otp()
+            session.pop("sms_setup_phone", None)
+            return redirect(url_for("profile_sms_setup"))
+
+    return render_template("profile_sms_setup.html", email=user[1], pending_phone=pending_phone)
+
+
+@app.route("/profile/2fa/sms/disable", methods=["POST"])
+@login_required
+def profile_sms_disable():
+    user = get_user_by_id(session["user_id"])
+    if not user or enabled_method_count(user) < 2:
+        flash("You need at least one two-factor method enabled. Enable another method first.", "error")
+        return redirect(url_for("profile"))
+
+    set_sms_2fa(user[0], None)
+    flash("SMS verification disabled and phone number removed.", "success")
     return redirect(url_for("profile"))
 
 

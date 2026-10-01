@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ 'Add Mobile Number' if needs_phone else 'Enter SMS Code' }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+    {% if needs_phone %}
+    <h2>Get a code by text</h2>
+    <p class="helper-text">Enter your mobile number with the country code (e.g. +14155552671). We'll text you a verification code.</p>
+
+    <form method="POST">
+        <input type="hidden" name="step" value="send">
+        <input type="tel" name="phone" placeholder="+14155552671" required autocomplete="tel">
+        <button type="submit">Send code</button>
+    </form>
+    {% else %}
+    <h2>Check your phone</h2>
+    <p class="helper-text">We texted a verification code to {{ masked_phone }}. It expires in 10 minutes.</p>
+
+    <form method="POST">
+        <input type="hidden" name="step" value="verify">
+        <input type="text" name="code" placeholder="Verification code" required maxlength="10"
+               inputmode="numeric" autocomplete="one-time-code">
+        <button type="submit">Verify</button>
+    </form>
+    {% endif %}
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+    {% with messages = get_flashed_messages() %}
+    {% for message in messages %}
+    <p class="error">{{ message }}</p>
+    {% endfor %}
+    {% endwith %}
+
+    {% if not needs_phone %}
+    <a href="/two-factor/sms/resend">Resend code</a>
+    &middot;
+    {% if can_change_number %}
+    <form method="POST" style="display:inline">
+        <input type="hidden" name="step" value="restart">
+        <button type="submit" class="link-btn">Use a different number</button>
+    </form>
+    &middot;
+    {% endif %}
+    {% endif %}
+    <a href="/two-factor/choose">Use another method</a>
+</div>
+
+</body>
+</html>

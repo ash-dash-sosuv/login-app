@@ -40,6 +40,16 @@ All configuration is via environment variables:
 | `DATABASE`     | `users.db`                      | SQLite file path, used only when `DATABASE_URL` is unset (local dev / tests).                |
 | `PORT`         | `5000`                          | Port to bind. Most PaaS platforms inject this automatically.                                |
 | `FLASK_DEBUG`  | `1`                             | Only affects `python app.py`. Set to `0` outside local dev.                                 |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_VERIFY_SERVICE_SID` | _(unset)_ | Enables SMS login codes via Twilio Verify. When unset, SMS codes are printed to the console. |
+| `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` | _(unset)_ | Recommended Twilio credentials (restrictable, revocable). Takes precedence over the Auth Token. |
+| `TWILIO_AUTH_TOKEN` | _(unset)_ | Alternative Twilio credential, used only when no API Key is set. |
+
+### SMS verification (Twilio Verify)
+
+Users add a phone number from **Profile → SMS Verification**; the number must
+be confirmed with a texted code before it can be used at login. Numbers are
+entered in E.164 format (e.g. `+14155552671`). Twilio generates, delivers, and
+checks the codes, so no SMS code is stored by the app.
 
 ### Database backend
 

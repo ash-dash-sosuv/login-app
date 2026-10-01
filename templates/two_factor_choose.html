@@ -16,6 +16,9 @@
             📧&nbsp; Email me a code
         </button>
         {% endif %}
+        <button type="submit" name="method" value="sms" class="choice-btn">
+            💬&nbsp; {% if sms_enabled %}Text a code to {{ masked_phone }}{% else %}Text a code to my mobile number{% endif %}
+        </button>
         <button type="submit" name="method" value="authenticator" class="choice-btn">
             📱&nbsp; Use my authenticator app
         </button>
