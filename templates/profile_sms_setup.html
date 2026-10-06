@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Set Up SMS Verification{% endblock %}
+{% block page_title %}Set Up SMS Verification{% endblock %}
+
+{% block content %}
+<div class="breadcrumb"><a href="{{ url_for('profile') }}">Profile</a> &rarr; Set Up SMS Verification</div>
+<h1 class="page-heading">Set Up SMS Verification</h1>
+
+<div class="panel">
+    {% if pending_phone %}
+    <p class="helper-text">We texted a verification code to {{ pending_phone }}. Enter it below to finish setup.</p>
+
+    <form method="POST" class="contact-form">
+        <input type="hidden" name="step" value="verify">
+        <input type="text" name="code" placeholder="Verification code" required maxlength="10"
+               inputmode="numeric" autocomplete="one-time-code">
+        <button type="submit" class="btn btn-primary">Verify and Enable</button>
+    </form>
+
+    <form method="POST" class="contact-form">
+        <input type="hidden" name="step" value="restart">
+        <button type="submit" class="btn btn-small btn-outline">Use a different number</button>
+    </form>
+    {% else %}
+    <p class="helper-text">Enter your mobile number in international format, including the country code (e.g. +14155552671). We'll text you a code to confirm it.</p>
+
+    <form method="POST" class="contact-form">
+        <input type="hidden" name="step" value="send">
+        <label class="form-label">Phone Number</label>
+        <input type="tel" name="phone" placeholder="+14155552671" required autocomplete="tel">
+        <button type="submit" class="btn btn-primary">Send Code</button>
+    </form>
+    {% endif %}
+
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
+</div>
+{% endblock %}

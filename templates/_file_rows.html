@@ -1,0 +1,7 @@
+{% for f in files %}
+<tr>
+    <td>{{ f.name }}</td>
+    <td>{{ f.size_display }}</td>
+    <td>{{ f.modified }}</td>
+</tr>
+{% endfor %}
