@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}About Us{% endblock %}
+{% block page_title %}About Us{% endblock %}
+
+{% block content %}
+<h1 class="page-heading">About Vaultly</h1>
+<p class="page-subheading">Secure file and document management, built for people who take their data seriously.</p>
+
+<div class="panel">
+    <p>
+        Vaultly gives you a single, secure place to store, organize, and retrieve the documents
+        that matter most — financial statements, contracts, receipts, and personal records —
+        protected behind two-factor authentication and encrypted-at-rest storage practices.
+    </p>
+    <p>
+        We started Vaultly with a simple idea: managing your important files shouldn't require
+        juggling a dozen different tools. Whether you're archiving a year of invoices or keeping
+        tax documents organized for the next filing season, Vaultly keeps everything a click away.
+    </p>
+</div>
+
+<div class="card-grid">
+    <div class="info-card">
+        <div class="action-icon">&#128274;</div>
+        <div class="action-title">Security First</div>
+        <div class="action-desc">Two-factor authentication and hashed credentials protect every account by default.</div>
+    </div>
+    <div class="info-card">
+        <div class="action-icon">&#9889;</div>
+        <div class="action-title">Fast Access</div>
+        <div class="action-desc">Upload and download your files in seconds, from any device with a browser.</div>
+    </div>
+    <div class="info-card">
+        <div class="action-icon">&#128202;</div>
+        <div class="action-title">Built for Finance</div>
+        <div class="action-desc">Designed around the workflows of people managing financial and legal documents.</div>
+    </div>
+</div>
+{% endblock %}
