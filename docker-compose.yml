@@ -1,0 +1,35 @@
+# Single-server deployment: the Flask app behind Caddy, which gets and renews
+# a free HTTPS certificate automatically. Run via ./deploy.sh, which sets DOMAIN.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Pin the internal port so a PORT left in .env can't break the proxy.
+      PORT: "5000"
+    volumes:
+      # Host folders, so accounts and uploads survive rebuilds and reboots.
+      - ./data:/data
+      - ./uploads:/root/Downloads/upload_login_app
+    expose:
+      - "5000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set - run ./deploy.sh}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

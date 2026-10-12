@@ -12,6 +12,10 @@ env/
 # Local database (do not commit user data)
 *.db
 
+# Server data folders created by docker-compose / deploy.sh
+data/
+uploads/
+
 # Environment / secrets
 .env
 .env.local

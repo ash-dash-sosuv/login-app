@@ -168,6 +168,22 @@ to `/root/Downloads/upload_login_app` inside the container, which is **not**
 on that volume. To keep uploads, mount a volume there too, for example with
 `-v login-app-files:/root/Downloads/upload_login_app`.
 
+### Single server with HTTPS (AWS EC2, any Linux VM)
+
+`docker-compose.yml` runs the app behind [Caddy](https://caddyserver.com/),
+which gets a free HTTPS certificate automatically. On the server (ports 80 and
+443 open):
+
+```bash
+git clone <this repo> && cd login-app
+cp .env.example .env && nano .env   # SMTP/Twilio values; set FLASK_DEBUG=0
+./deploy.sh
+```
+
+The app is served at `https://<public-ip-with-dashes>.sslip.io` (or pass
+`DOMAIN=your.domain ./deploy.sh`). Accounts are stored in `./data` and uploads
+in `./uploads` on the server. Re-run `./deploy.sh` to pull and redeploy.
+
 ### Manual (systemd, bare VM, etc.)
 
 ```bash

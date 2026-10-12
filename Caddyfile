@@ -1,0 +1,6 @@
+# DOMAIN comes from docker-compose (e.g. 13-233-10-20.sslip.io). Caddy obtains
+# and renews the Let's Encrypt certificate for it automatically.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:5000
+}
