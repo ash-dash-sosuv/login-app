@@ -45,8 +45,10 @@ BUILDX_CURRENT=$(sudo docker buildx version 2>/dev/null | grep -oE 'v[0-9]+\.[0-
 if [ -z "$BUILDX_CURRENT" ] || \
    [ "$(printf '%s\n' 0.17.0 "$BUILDX_CURRENT" | sort -V | head -1)" != 0.17.0 ]; then
   log "Installing Docker Buildx plugin (found: ${BUILDX_CURRENT:-none})"
-  BUILDX_VERSION=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
-    | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  # /releases/latest redirects to /releases/tag/<version>; take the tag from it.
+  BUILDX_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+    https://github.com/docker/buildx/releases/latest)
+  BUILDX_VERSION=${BUILDX_URL##*/}
   sudo mkdir -p "$PLUGIN_DIR"
   sudo curl -fsSL -o "$PLUGIN_DIR/docker-buildx" \
     "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-${BIN_ARCH}"
