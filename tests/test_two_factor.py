@@ -1,3 +1,4 @@
+import io
 import os
 import sqlite3
 import tempfile
@@ -291,6 +292,90 @@ class SmsTwoFactorTests(unittest.TestCase):
         response = self.client.post("/two-factor/sms", data={"step": "send", "phone": self.PHONE})
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"couldn&#39;t send a text", response.data)
+
+
+class PerUserFileTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.temp_db.close()
+        auth_module.configure_database(f"sqlite:///{self.temp_db.name}")
+        auth_module.init_db()
+        auth_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.client = auth_module.app.test_client()
+        # Keep test uploads out of the real upload folder.
+        upload_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(upload_dir.cleanup)
+        upload_patch = patch.object(auth_module, "UPLOAD_DIR", upload_dir.name)
+        upload_patch.start()
+        self.addCleanup(upload_patch.stop)
+        self.upload_root = upload_dir.name
+
+        self.alice_id, _ = auth_module.create_user("alice@example.com", "password123")
+        self.bob_id, _ = auth_module.create_user("bob@example.com", "password123")
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db.name):
+            os.remove(self.temp_db.name)
+
+    def _log_in_as(self, user_id, email):
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = user_id
+            sess["email"] = email
+
+    def _upload(self, name, content=b"hello"):
+        return self.client.post(
+            "/files/upload",
+            data={"files": (io.BytesIO(content), name)},
+            content_type="multipart/form-data",
+        )
+
+    def test_upload_goes_into_the_users_own_folder(self):
+        self._log_in_as(self.alice_id, "alice@example.com")
+        self._upload("notes.txt")
+
+        self.assertTrue(
+            os.path.isfile(os.path.join(self.upload_root, str(self.alice_id), "notes.txt"))
+        )
+        self.assertFalse(os.path.exists(os.path.join(self.upload_root, "notes.txt")))
+
+    def test_user_can_download_their_own_file(self):
+        self._log_in_as(self.alice_id, "alice@example.com")
+        self._upload("notes.txt", b"alice's notes")
+
+        response = self.client.get("/files/download/notes.txt")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"alice's notes")
+
+    def test_other_users_files_are_not_listed_or_downloadable(self):
+        self._log_in_as(self.alice_id, "alice@example.com")
+        self._upload("secret.txt")
+
+        self._log_in_as(self.bob_id, "bob@example.com")
+        listing = self.client.get("/files/download")
+        download = self.client.get("/files/download/secret.txt")
+
+        self.assertNotIn(b"secret.txt", listing.data)
+        self.assertEqual(download.status_code, 302)
+
+    def test_path_traversal_into_another_users_folder_is_rejected(self):
+        self._log_in_as(self.alice_id, "alice@example.com")
+        self._upload("secret.txt")
+
+        self._log_in_as(self.bob_id, "bob@example.com")
+        response = self.client.get(f"/files/download/../{self.alice_id}/secret.txt")
+
+        self.assertNotEqual(response.status_code, 200)
+
+    def test_same_filename_for_two_users_does_not_collide(self):
+        self._log_in_as(self.alice_id, "alice@example.com")
+        self._upload("report.txt", b"alice")
+        self._log_in_as(self.bob_id, "bob@example.com")
+        self._upload("report.txt", b"bob")
+
+        self.assertEqual(self.client.get("/files/download/report.txt").data, b"bob")
+        self._log_in_as(self.alice_id, "alice@example.com")
+        self.assertEqual(self.client.get("/files/download/report.txt").data, b"alice")
 
 
 if __name__ == "__main__":

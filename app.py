@@ -494,11 +494,22 @@ def format_file_size(num_bytes):
     return f"{size:.1f} TB"
 
 
-def list_uploaded_files():
-    """Files currently sitting in UPLOAD_DIR, newest first."""
+def user_upload_dir(user_id):
+    """Each user's files live in their own subfolder, UPLOAD_DIR/<user id>.
+
+    The numeric id (not the email) names the folder: it never changes and is
+    always a safe path component.
+    """
+    path = os.path.join(UPLOAD_DIR, str(int(user_id)))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def list_uploaded_files(directory):
+    """Files currently sitting in directory, newest first."""
     entries = []
-    for name in os.listdir(UPLOAD_DIR):
-        path = os.path.join(UPLOAD_DIR, name)
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
         if not os.path.isfile(path):
             continue
         stat = os.stat(path)
@@ -874,7 +885,7 @@ def two_factor_sms_resend():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    files = list_uploaded_files()
+    files = list_uploaded_files(user_upload_dir(session["user_id"]))
     return render_template(
         "dashboard.html",
         email=session["email"],
@@ -887,7 +898,7 @@ def dashboard():
 @app.route("/files")
 @login_required
 def files_home():
-    files = list_uploaded_files()
+    files = list_uploaded_files(user_upload_dir(session["user_id"]))
     return render_template(
         "files.html",
         email=session["email"],
@@ -899,6 +910,7 @@ def files_home():
 @app.route("/files/upload", methods=["GET", "POST"])
 @login_required
 def files_upload():
+    user_dir = user_upload_dir(session["user_id"])
     if request.method == "POST":
         uploaded = [f for f in request.files.getlist("files") if f and f.filename]
         saved, skipped = [], []
@@ -908,13 +920,13 @@ def files_upload():
             if not filename:
                 skipped.append(file.filename)
                 continue
-            filename = unique_filename(UPLOAD_DIR, filename)
-            file.save(os.path.join(UPLOAD_DIR, filename))
+            filename = unique_filename(user_dir, filename)
+            file.save(os.path.join(user_dir, filename))
             saved.append(filename)
 
         is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
         if is_ajax:
-            return jsonify(saved=saved, skipped=skipped, files=list_uploaded_files())
+            return jsonify(saved=saved, skipped=skipped, files=list_uploaded_files(user_dir))
 
         if saved:
             flash(f"Uploaded {len(saved)} file(s) successfully.", "success")
@@ -922,24 +934,26 @@ def files_upload():
             flash(f"Skipped {len(skipped)} file(s) with an invalid name.", "error")
         return redirect(url_for("files_upload"))
 
-    return render_template("files_upload.html", email=session["email"], files=list_uploaded_files())
+    return render_template("files_upload.html", email=session["email"], files=list_uploaded_files(user_dir))
 
 
 @app.route("/files/download")
 @login_required
 def files_download():
-    return render_template("files_download.html", email=session["email"], files=list_uploaded_files())
+    files = list_uploaded_files(user_upload_dir(session["user_id"]))
+    return render_template("files_download.html", email=session["email"], files=files)
 
 
 @app.route("/files/download/<path:filename>")
 @login_required
 def files_download_file(filename):
+    user_dir = user_upload_dir(session["user_id"])
     safe_name = os.path.basename(filename)
-    if safe_name != filename or not os.path.isfile(os.path.join(UPLOAD_DIR, safe_name)):
+    if safe_name != filename or not os.path.isfile(os.path.join(user_dir, safe_name)):
         flash("That file could not be found.", "error")
         return redirect(url_for("files_download"))
 
-    return send_from_directory(UPLOAD_DIR, safe_name, as_attachment=True)
+    return send_from_directory(user_dir, safe_name, as_attachment=True)
 
 
 @app.route("/about")
@@ -962,7 +976,7 @@ def contact():
 @login_required
 def profile():
     user = get_user_by_id(session["user_id"])
-    files = list_uploaded_files()
+    files = list_uploaded_files(user_upload_dir(session["user_id"]))
     return render_template(
         "profile.html",
         email=session["email"],
