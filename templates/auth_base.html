@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Sign in{% endblock %} · Vaultly</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-body">
+
+<main class="auth-shell">
+    <a class="auth-brand" href="{{ url_for('login') }}">
+        <span class="brand-mark">V</span>
+        <span class="auth-brand-name">Vaultly</span>
+    </a>
+
+    <div class="auth-card">
+        {% block content %}{% endblock %}
+    </div>
+
+    <p class="auth-footer">{% block footer %}Your files, protected with two-step verification.{% endblock %}</p>
+</main>
+
+</body>
+</html>

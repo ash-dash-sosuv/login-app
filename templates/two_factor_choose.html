@@ -1,41 +1,47 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{{ 'Set Up Verification' if enrolling else 'Choose Verification Method' }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-{% from "_meme.html" import meme %}
+{% extends "auth_base.html" %}
+{% block title %}{{ 'Set up verification' if enrolling else 'Verify it’s you' }}{% endblock %}
 
-<div class="container">
-    {% if enrolling %}
-    <h2>Secure your account</h2>
-    <p class="helper-text">Choose how you'd like to verify it's you each time you sign in. You can add more methods later from your profile.</p>
+{% macro choice(value, enabled, icon, title, description, not_set_up_note) %}
+<button type="submit" name="method" value="{{ value }}" class="method-choice"{% if not enabled %} disabled{% endif %}>
+    <span class="action-icon" aria-hidden="true">{{ icon }}</span>
+    <span class="method-choice-text">
+        <span class="method-choice-title">{{ title }}</span>
+        <span class="method-choice-desc">{{ description if enabled else not_set_up_note }}</span>
+    </span>
+    {% if enabled %}
+    <span class="method-choice-arrow" aria-hidden="true">&rsaquo;</span>
     {% else %}
-    <h2>Verify it's you</h2>
-    <p class="helper-text">Choose how you'd like to receive your verification code.</p>
+    <span class="badge badge-muted">Not set up</span>
     {% endif %}
+</button>
+{% endmacro %}
 
-    <form method="POST">
-        <button type="submit" name="method" value="email" class="choice-btn"{% if not email_enabled %} disabled{% endif %}>
-            📧&nbsp; Email me a code
-            {% if not email_enabled %}<span class="choice-note">Not enabled for your account</span>{% endif %}
-        </button>
-        <button type="submit" name="method" value="sms" class="choice-btn"{% if not sms_enabled %} disabled{% endif %}>
-            💬&nbsp; {% if masked_phone %}Text a code to {{ masked_phone }}{% else %}Text a code to my mobile number{% endif %}
-            {% if not sms_enabled %}<span class="choice-note">Not set up — add a number from your profile</span>{% endif %}
-        </button>
-        <button type="submit" name="method" value="authenticator" class="choice-btn"{% if not authenticator_enabled %} disabled{% endif %}>
-            📱&nbsp; Use {{ 'an' if enrolling else 'my' }} authenticator app
-            {% if not authenticator_enabled %}<span class="choice-note">Not set up — add one from your profile</span>{% endif %}
-        </button>
-    </form>
+{% block content %}
+{% from "_alerts.html" import alert %}
+{% if enrolling %}
+<span class="auth-eyebrow">Last step</span>
+<h1 class="auth-title">Secure your account</h1>
+<p class="auth-subtitle">Choose how you'd like to verify it's you each time you sign in. You can add more methods later from your profile.</p>
+{% else %}
+<span class="auth-eyebrow">Two-step verification</span>
+<h1 class="auth-title">Verify it's you</h1>
+<p class="auth-subtitle">Choose how you'd like to receive your verification code.</p>
+{% endif %}
 
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
-    {% endif %}
+{{ alert(error) }}
+
+<form method="POST" class="method-choices">
+    {{ choice("email", email_enabled, "📧", "Email me a code",
+              "A 6-digit code, sent to your inbox", "Not enabled for your account") }}
+    {{ choice("sms", sms_enabled, "💬",
+              "Text a code to " ~ masked_phone if masked_phone else "Text me a code",
+              "A code by text message to your phone", "Add a number from your profile") }}
+    {{ choice("authenticator", authenticator_enabled, "📱",
+              "Use " ~ ("an" if enrolling else "my") ~ " authenticator app",
+              "Google Authenticator, 1Password, Authy…", "Add one from your profile") }}
+</form>
+
+<div class="auth-links">
+    <a href="{{ url_for('logout') }}">Not you? Start over</a>
 </div>
-
-</body>
-</html>
+{% endblock %}

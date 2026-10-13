@@ -1,0 +1,11 @@
+{% from "_meme.html" import meme %}
+{# A message box with its meme, styled like the in-app flash messages.
+   Renders nothing for an empty message, so it can be called unconditionally. #}
+{% macro alert(message, category="error") %}
+{% if message %}
+<div class="flash flash-{{ category }}" role="{{ 'alert' if category == 'error' else 'status' }}">
+    {{ message }}
+    {{ meme(meme_for(message, category)) }}
+</div>
+{% endif %}
+{% endmacro %}

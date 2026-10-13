@@ -1,34 +1,40 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Set Up Two-Factor Authentication</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-{% from "_meme.html" import meme %}
+{% extends "auth_base.html" %}
+{% block title %}Set up your authenticator{% endblock %}
 
-<div class="container">
-    <h2>Secure your account</h2>
-    <p>Scan this QR code with Google Authenticator or another TOTP app.</p>
+{% block content %}
+{% from "_alerts.html" import alert %}
+<span class="auth-eyebrow">Authenticator app</span>
+<h1 class="auth-title">Set up your authenticator</h1>
+<p class="auth-subtitle">It takes about a minute.</p>
 
-    <img class="qr-code" src="{{ qr_code }}" alt="Two-factor QR code">
+{{ alert(error) }}
 
-    <p class="helper-text">The code refreshes every 30 seconds. Enter the current 6-digit code below.</p>
+<ol class="setup-steps">
+    <li>Open Google Authenticator, 1Password, Authy or any authenticator app.</li>
+    <li>Scan this QR code to add your Vaultly account.</li>
+    <li>Enter the 6-digit code the app shows. It changes every 30 seconds.</li>
+</ol>
 
-    <form method="POST">
-        <input type="text" name="code" placeholder="6-digit code" required maxlength="6">
-        <button type="submit">Verify and finish setup</button>
-    </form>
-
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
-    {% endif %}
-
-    <div class="secret-box">
-        <strong>Manual secret:</strong> {{ secret }}
-    </div>
+<div class="qr-frame">
+    <img src="{{ qr_code }}" alt="QR code for your authenticator app">
 </div>
 
-</body>
-</html>
+<details class="manual-key">
+    <summary>Can't scan? Enter a key instead</summary>
+    <code>{{ secret }}</code>
+</details>
+
+<form method="POST" class="auth-form">
+    <div class="auth-field">
+        <label class="auth-label" for="code">6-digit code</label>
+        <input class="auth-input auth-input-code" id="code" type="text" name="code" placeholder="123456"
+               required maxlength="6" inputmode="numeric" autocomplete="one-time-code">
+    </div>
+    <button type="submit" class="auth-submit">Verify and finish</button>
+</form>
+
+<div class="auth-links">
+    <a href="{{ url_for('two_factor_choose') }}">Choose a different method</a>
+    <a href="{{ url_for('logout') }}">Start over</a>
+</div>
+{% endblock %}

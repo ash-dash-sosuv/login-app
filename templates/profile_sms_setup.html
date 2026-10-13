@@ -3,39 +3,45 @@
 {% block page_title %}Set Up SMS Verification{% endblock %}
 
 {% block content %}
-{% from "_meme.html" import meme %}
+{% from "_alerts.html" import alert %}
 <div class="breadcrumb"><a href="{{ url_for('profile') }}">Profile</a> &rarr; Set Up SMS Verification</div>
 <h1 class="page-heading">Set Up SMS Verification</h1>
+<p class="page-subheading">Get sign-in codes by text message.</p>
 
-<div class="panel">
+<div class="panel setup-panel">
+    {{ alert(error) }}
+
     {% if pending_phone %}
-    <p class="helper-text">We texted a verification code to {{ pending_phone }}. Enter it below to finish setup.</p>
+    <p class="panel-note">We texted a verification code to <strong>{{ pending_phone }}</strong>. Enter it below to finish setup.</p>
 
-    <form method="POST" class="contact-form">
+    <form method="POST" class="auth-form">
         <input type="hidden" name="step" value="verify">
-        <input type="text" name="code" placeholder="Verification code" required maxlength="10"
-               inputmode="numeric" autocomplete="one-time-code">
-        <button type="submit" class="btn btn-primary">Verify and Enable</button>
+        <div class="auth-field">
+            <label class="auth-label" for="code">Verification code</label>
+            <input class="auth-input auth-input-code" id="code" type="text" name="code" placeholder="123456"
+                   required maxlength="10" inputmode="numeric" autocomplete="one-time-code" autofocus>
+        </div>
+        <button type="submit" class="auth-submit">Verify and enable</button>
     </form>
 
-    <form method="POST" class="contact-form">
-        <input type="hidden" name="step" value="restart">
-        <button type="submit" class="btn btn-small btn-outline">Use a different number</button>
-    </form>
+    <div class="auth-links">
+        <form method="POST">
+            <input type="hidden" name="step" value="restart">
+            <button type="submit" class="auth-link-btn">Use a different number</button>
+        </form>
+    </div>
     {% else %}
-    <p class="helper-text">Enter your mobile number in international format, including the country code (e.g. +14155552671). We'll text you a code to confirm it.</p>
+    <p class="panel-note">Enter your mobile number with the country code. We'll text you a code to confirm it's yours.</p>
 
-    <form method="POST" class="contact-form">
+    <form method="POST" class="auth-form">
         <input type="hidden" name="step" value="send">
-        <label class="form-label">Phone Number</label>
-        <input type="tel" name="phone" placeholder="+14155552671" required autocomplete="tel">
-        <button type="submit" class="btn btn-primary">Send Code</button>
+        <div class="auth-field">
+            <label class="auth-label" for="phone">Mobile number</label>
+            <input class="auth-input" id="phone" type="tel" name="phone" placeholder="+14155552671"
+                   required autocomplete="tel">
+        </div>
+        <button type="submit" class="auth-submit">Send code</button>
     </form>
-    {% endif %}
-
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
     {% endif %}
 </div>
 {% endblock %}

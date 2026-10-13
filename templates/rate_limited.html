@@ -1,19 +1,13 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Too Many Attempts</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
+{% extends "auth_base.html" %}
+{% block title %}Too many attempts{% endblock %}
+
+{% block content %}
 {% from "_meme.html" import meme %}
+<div class="auth-status">Slow down</div>
+<h1 class="auth-title">Too many attempts</h1>
+<p class="auth-subtitle">For your security we've paused this for a while. Please wait about {{ minutes }} minute{{ 's' if minutes != 1 else '' }} and try again.</p>
 
-<div class="container">
-    <h2>Too many attempts</h2>
-    <p class="helper-text">For your security we've paused this for a while. Please wait about {{ minutes }} minute{{ 's' if minutes != 1 else '' }} and try again.</p>
-    {{ meme(meme_by_key("rate_limited")) }}
+{{ meme(meme_by_key("rate_limited")) }}
 
-    <a href="javascript:history.back()">Go back</a>
-</div>
-
-</body>
-</html>
+<a class="auth-submit" href="javascript:history.back()">Go back</a>
+{% endblock %}

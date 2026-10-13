@@ -1,23 +1,18 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{{ title }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
+{% extends "auth_base.html" %}
+{# Must not touch the database: it also reports database failures. #}
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
 {% from "_meme.html" import meme %}
+<div class="auth-status">Error {{ status }}</div>
+<h1 class="auth-title">{{ title }}</h1>
+<p class="auth-subtitle">{{ message }}</p>
 
-<div class="container">
-    <h2>{{ title }}</h2>
-    <p class="helper-text">{{ message }}</p>
-    {{ meme(meme_for_status(status)) }}
+{{ meme(meme_for_status(status)) }}
 
-    {% if session.get("user_id") %}
-    <a href="/dashboard">Go to your dashboard</a>
-    {% else %}
-    <a href="/login">Go to sign in</a>
-    {% endif %}
-</div>
-
-</body>
-</html>
+{% if session.get("user_id") %}
+<a class="auth-submit" href="{{ url_for('dashboard') }}">Go to your dashboard</a>
+{% else %}
+<a class="auth-submit" href="{{ url_for('login') }}">Go to sign in</a>
+{% endif %}
+{% endblock %}

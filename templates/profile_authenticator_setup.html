@@ -3,28 +3,36 @@
 {% block page_title %}Set Up Authenticator{% endblock %}
 
 {% block content %}
-{% from "_meme.html" import meme %}
+{% from "_alerts.html" import alert %}
 <div class="breadcrumb"><a href="{{ url_for('profile') }}">Profile</a> &rarr; Set Up Authenticator</div>
 <h1 class="page-heading">Set Up Authenticator App</h1>
-<p class="page-subheading">Scan this QR code with Google Authenticator or another TOTP app.</p>
+<p class="page-subheading">Use codes from an app on your phone to sign in.</p>
 
-<div class="panel">
-    <img class="qr-code" src="{{ qr_code }}" alt="Two-factor QR code">
+<div class="panel setup-panel">
+    {{ alert(error) }}
 
-    <p class="helper-text">The code refreshes every 30 seconds. Enter the current 6-digit code below to finish setup.</p>
+    <ol class="setup-steps">
+        <li>Open Google Authenticator, 1Password, Authy or any authenticator app.</li>
+        <li>Scan this QR code to add your Vaultly account.</li>
+        <li>Enter the 6-digit code the app shows. It changes every 30 seconds.</li>
+    </ol>
 
-    <form method="POST" class="contact-form">
-        <input type="text" name="code" placeholder="6-digit code" required maxlength="6">
-        <button type="submit" class="btn btn-primary">Verify and Enable</button>
-    </form>
-
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
-    {% endif %}
-
-    <div class="secret-box">
-        <strong>Manual secret:</strong> {{ secret }}
+    <div class="qr-frame">
+        <img src="{{ qr_code }}" alt="QR code for your authenticator app">
     </div>
+
+    <details class="manual-key">
+        <summary>Can't scan? Enter a key instead</summary>
+        <code>{{ secret }}</code>
+    </details>
+
+    <form method="POST" class="auth-form">
+        <div class="auth-field">
+            <label class="auth-label" for="code">6-digit code</label>
+            <input class="auth-input auth-input-code" id="code" type="text" name="code" placeholder="123456"
+                   required maxlength="6" inputmode="numeric" autocomplete="one-time-code">
+        </div>
+        <button type="submit" class="auth-submit">Verify and enable</button>
+    </form>
 </div>
 {% endblock %}

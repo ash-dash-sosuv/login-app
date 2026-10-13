@@ -75,7 +75,7 @@ class TwoFactorAuthTests(unittest.TestCase):
         page = self.client.get("/two-factor/choose").data
         self.assertIn(b"Secure your account", page)
         for method in (b"email", b"sms", b"authenticator"):
-            self.assertIn(b'value="' + method + b'" class="choice-btn">', page)
+            self.assertIn(b'value="' + method + b'" class="method-choice">', page)
 
     def test_new_account_can_enroll_authenticator(self):
         user_id, secret = auth_module.create_user("auth@example.com", "password123")
@@ -109,9 +109,9 @@ class TwoFactorAuthTests(unittest.TestCase):
 
         page = self.client.get("/two-factor/choose").data
 
-        self.assertIn(b'value="email" class="choice-btn">', page)
-        self.assertIn(b'value="sms" class="choice-btn" disabled', page)
-        self.assertIn(b'value="authenticator" class="choice-btn" disabled', page)
+        self.assertIn(b'value="email" class="method-choice">', page)
+        self.assertIn(b'value="sms" class="method-choice" disabled', page)
+        self.assertIn(b'value="authenticator" class="method-choice" disabled', page)
 
     def test_choosing_authenticator_that_is_not_enabled_is_rejected(self):
         self._email_only_user("auth@example.com")
@@ -291,7 +291,7 @@ class SmsTwoFactorTests(unittest.TestCase):
         auth_module.set_email_2fa(user_id, True)
         self._login_with_password("nophone@example.com")
 
-        self.assertIn(b'value="sms" class="choice-btn" disabled', self.client.get("/two-factor/choose").data)
+        self.assertIn(b'value="sms" class="method-choice" disabled', self.client.get("/two-factor/choose").data)
 
         with patch.object(auth_module, "start_sms_otp") as send:
             choose = self.client.post("/two-factor/choose", data={"method": "sms"})

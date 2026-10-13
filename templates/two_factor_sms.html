@@ -1,58 +1,55 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{{ 'Add Mobile Number' if needs_phone else 'Enter SMS Code' }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-{% from "_meme.html" import meme %}
+{% extends "auth_base.html" %}
+{% block title %}{{ 'Add your mobile number' if needs_phone else 'Check your phone' }}{% endblock %}
 
-<div class="container">
-    {% if needs_phone %}
-    <h2>Get a code by text</h2>
-    <p class="helper-text">Enter your mobile number with the country code (e.g. +14155552671). We'll text you a verification code.</p>
+{% block content %}
+{% from "_alerts.html" import alert %}
+<span class="auth-eyebrow">{{ 'Text message' if needs_phone else 'Two-step verification' }}</span>
+{% if needs_phone %}
+<h1 class="auth-title">Get a code by text</h1>
+<p class="auth-subtitle">Enter your mobile number with the country code. We'll text you a code to confirm it's yours.</p>
+{% else %}
+<h1 class="auth-title">Check your phone</h1>
+<p class="auth-subtitle">We texted a verification code to <strong>{{ masked_phone }}</strong>. It expires in 10 minutes.</p>
+{% endif %}
 
-    <form method="POST">
-        <input type="hidden" name="step" value="send">
-        <input type="tel" name="phone" placeholder="+14155552671" required autocomplete="tel">
-        <button type="submit">Send code</button>
-    </form>
-    {% else %}
-    <h2>Check your phone</h2>
-    <p class="helper-text">We texted a verification code to {{ masked_phone }}. It expires in 10 minutes.</p>
+{{ alert(error) }}
+{% for message in get_flashed_messages() %}
+{{ alert(message) }}
+{% endfor %}
 
-    <form method="POST">
-        <input type="hidden" name="step" value="verify">
-        <input type="text" name="code" placeholder="Verification code" required maxlength="10"
-               inputmode="numeric" autocomplete="one-time-code">
-        <button type="submit">Verify</button>
-    </form>
-    {% endif %}
+{% if needs_phone %}
+<form method="POST" class="auth-form">
+    <input type="hidden" name="step" value="send">
+    <div class="auth-field">
+        <label class="auth-label" for="phone">Mobile number</label>
+        <input class="auth-input" id="phone" type="tel" name="phone" placeholder="+14155552671"
+               required autocomplete="tel" autofocus>
+    </div>
+    <button type="submit" class="auth-submit">Send code</button>
+</form>
+{% else %}
+<form method="POST" class="auth-form">
+    <input type="hidden" name="step" value="verify">
+    <div class="auth-field">
+        <label class="auth-label" for="code">Verification code</label>
+        <input class="auth-input auth-input-code" id="code" type="text" name="code" placeholder="123456"
+               required maxlength="10" inputmode="numeric" autocomplete="one-time-code" autofocus>
+    </div>
+    <button type="submit" class="auth-submit">Verify</button>
+</form>
+{% endif %}
 
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
-    {% endif %}
-    {% with messages = get_flashed_messages() %}
-    {% for message in messages %}
-    <p class="error">{{ message }}</p>
-    {{ meme(meme_for(message)) }}
-    {% endfor %}
-    {% endwith %}
-
+<div class="auth-links">
     {% if not needs_phone %}
-    <a href="/two-factor/sms/resend">Resend code</a>
-    &middot;
+    <a href="{{ url_for('two_factor_sms_resend') }}">Resend code</a>
     {% if can_change_number %}
-    <form method="POST" style="display:inline">
+    <form method="POST">
         <input type="hidden" name="step" value="restart">
-        <button type="submit" class="link-btn">Use a different number</button>
+        <button type="submit" class="auth-link-btn">Use a different number</button>
     </form>
-    &middot;
     {% endif %}
     {% endif %}
-    <a href="/two-factor/choose">Use another method</a>
+    <a href="{{ url_for('two_factor_choose') }}">Use another method</a>
+    <a href="{{ url_for('logout') }}">Start over</a>
 </div>
-
-</body>
-</html>
+{% endblock %}

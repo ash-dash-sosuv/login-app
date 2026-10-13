@@ -1,18 +1,5 @@
-body {
-    font-family: Arial, sans-serif;
-    background: #f5f5f5;
-    display: flex;
-    justify-content: center;
-    margin-top: 100px;
-}
-
-.container {
-    background: white;
-    padding: 30px;
-    width: 420px;
-    border-radius: 10px;
-    box-shadow: 0 0 15px rgba(0,0,0,.1);
-}
+/* Base form controls. The in-app forms (profile, contact) rely on these;
+   the sign-in pages use their own .auth-* classes further down. */
 
 input {
     width: 100%;
@@ -26,85 +13,6 @@ button {
     padding: 12px;
     margin-top: 15px;
     cursor: pointer;
-}
-
-.error {
-    color: red;
-}
-
-.choice-btn {
-    text-align: left;
-    font-size: 15px;
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-}
-
-.choice-btn:hover {
-    background: #f0f6ff;
-    border-color: #4a90d9;
-}
-
-.choice-btn:disabled,
-.choice-btn:disabled:hover {
-    background: #f5f5f5;
-    border-color: #ddd;
-    color: #999;
-    cursor: not-allowed;
-}
-
-.choice-note {
-    display: block;
-    margin-top: 4px;
-    font-size: 12px;
-    color: #999;
-}
-
-.container a {
-    display: inline-block;
-    margin-top: 15px;
-    color: #4a90d9;
-    text-decoration: none;
-}
-
-.container a:hover {
-    text-decoration: underline;
-}
-
-.link-btn {
-    width: auto;
-    padding: 0;
-    margin-top: 15px;
-    background: none;
-    border: none;
-    color: #4a90d9;
-    font: inherit;
-}
-
-.link-btn:hover {
-    text-decoration: underline;
-}
-
-.qr-code {
-    width: 220px;
-    height: 220px;
-    display: block;
-    margin: 15px auto;
-}
-
-.helper-text {
-    color: #666;
-    font-size: 14px;
-    margin-top: 10px;
-}
-
-.secret-box {
-    background: #f7f7f7;
-    border: 1px solid #ddd;
-    padding: 10px;
-    margin-top: 10px;
-    word-break: break-all;
-    border-radius: 6px;
 }
 
 /* ==========================================================================
@@ -868,5 +776,435 @@ body.app-body {
 
     .content {
         padding: 20px;
+    }
+}
+/* ==========================================================================
+   Sign-in, sign-up, verification and error pages. Built from the same
+   tokens and components as the app shell so both halves look like one app.
+   Class selectors here outrank the legacy element rules (input, button) at
+   the top of this file, which the in-app forms still rely on.
+   ========================================================================== */
+
+body.auth-body {
+    display: block;
+    margin: 0;
+    min-height: 100vh;
+    background:
+        radial-gradient(circle at 50% -120px, #e0e7ff 0, rgba(224, 231, 255, 0) 520px),
+        var(--page-bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+}
+
+.auth-shell {
+    min-height: 100vh;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 56px 16px 32px;
+}
+
+.auth-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 24px;
+    text-decoration: none;
+}
+
+.auth-brand-name {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 420px;
+    box-sizing: border-box;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.07);
+}
+
+.auth-eyebrow {
+    display: inline-block;
+    margin-bottom: 14px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.auth-title {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0 0 6px;
+}
+
+.auth-subtitle {
+    color: var(--muted);
+    font-size: 14.5px;
+    line-height: 1.5;
+    margin: 0 0 24px;
+}
+
+.auth-subtitle strong {
+    color: var(--ink);
+}
+
+.auth-card .flash {
+    margin-bottom: 20px;
+    line-height: 1.4;
+}
+
+.auth-card .flash .meme {
+    text-align: center;
+}
+
+.auth-card .flash .meme img {
+    max-width: 100%;
+}
+
+.auth-card > .meme {
+    margin: 0 0 20px;
+}
+
+.setup-panel .flash {
+    margin-bottom: 20px;
+}
+
+/* --- Forms --- */
+
+.auth-form {
+    margin: 0;
+}
+
+.auth-field {
+    margin-bottom: 16px;
+}
+
+.auth-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.auth-input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 11px 14px;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 15px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.auth-input::placeholder {
+    color: #9ca3af;
+}
+
+.auth-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px #e0e7ff;
+}
+
+.auth-input-code {
+    padding: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 22px;
+    letter-spacing: 0.35em;
+    text-align: center;
+}
+
+.auth-submit {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin: 8px 0 0;
+    padding: 12px 18px;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.auth-submit:hover {
+    background: var(--accent-dark);
+    color: #fff;
+    text-decoration: none;
+}
+
+.auth-submit:focus-visible,
+.method-choice:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px #c7d2fe;
+}
+
+/* --- Links under the form --- */
+
+.auth-switch {
+    margin: 22px 0 0;
+    text-align: center;
+    font-size: 14px;
+    color: var(--muted);
+}
+
+.auth-switch a,
+.auth-links a,
+.auth-link-btn {
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.auth-switch a:hover,
+.auth-links a:hover,
+.auth-link-btn:hover {
+    text-decoration: underline;
+}
+
+.auth-links {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 8px 18px;
+    margin-top: 22px;
+    font-size: 14px;
+}
+
+.auth-links form {
+    margin: 0;
+}
+
+.auth-link-btn {
+    width: auto;
+    margin: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+}
+
+.auth-footer {
+    margin: 24px 0 0;
+    font-size: 12.5px;
+    color: var(--muted);
+    text-align: center;
+}
+
+.auth-footer a {
+    color: var(--muted);
+}
+
+.auth-status {
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+/* --- Verification method chooser (cards like the dashboard's) --- */
+
+.method-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+}
+
+.method-choice {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    margin: 0;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--ink);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+}
+
+.method-choice:hover:not(:disabled) {
+    border-color: var(--accent);
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+    transform: translateY(-1px);
+}
+
+.method-choice .action-icon {
+    margin: 0;
+    flex-shrink: 0;
+}
+
+.method-choice-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.method-choice-title {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.method-choice-desc {
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.method-choice-arrow {
+    color: var(--muted);
+    font-size: 22px;
+    line-height: 1;
+}
+
+.method-choice:disabled {
+    background: #f8fafc;
+    cursor: not-allowed;
+}
+
+.method-choice:disabled .action-icon {
+    background: #f1f5f9;
+    filter: grayscale(1);
+    opacity: 0.6;
+}
+
+.method-choice:disabled .method-choice-title {
+    color: var(--muted);
+}
+
+.badge-muted {
+    flex-shrink: 0;
+    background: #f1f5f9;
+    color: var(--muted);
+}
+
+/* --- Authenticator setup (sign-in and profile) --- */
+
+.setup-steps {
+    list-style: none;
+    margin: 0 0 18px;
+    padding: 0;
+    counter-reset: setup-step;
+}
+
+.setup-steps li {
+    position: relative;
+    margin-bottom: 10px;
+    padding-left: 34px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.setup-steps li::before {
+    counter-increment: setup-step;
+    content: counter(setup-step);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #eef2ff;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.qr-frame {
+    display: flex;
+    justify-content: center;
+    margin: 0 0 14px;
+    padding: 16px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.qr-frame img {
+    display: block;
+    width: 200px;
+    height: 200px;
+}
+
+.manual-key {
+    margin: 0 0 20px;
+    font-size: 13.5px;
+    color: var(--muted);
+    text-align: center;
+}
+
+.manual-key summary {
+    color: var(--accent);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.manual-key code {
+    display: block;
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    word-break: break-all;
+}
+
+/* In-app setup pages use the same pieces inside a narrower panel. */
+.setup-panel {
+    max-width: 460px;
+}
+
+.setup-panel .auth-submit {
+    margin-top: 4px;
+}
+
+@media (max-width: 480px) {
+    .auth-shell {
+        padding-top: 32px;
+    }
+
+    .auth-card {
+        padding: 24px 20px;
     }
 }

@@ -1,26 +1,25 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Verify Two-Factor Code</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-{% from "_meme.html" import meme %}
+{% extends "auth_base.html" %}
+{% block title %}Enter your code{% endblock %}
 
-<div class="container">
-    <h2>Enter your authenticator code</h2>
-    <p class="helper-text">Open your authenticator app and enter the current 6-digit code.</p>
+{% block content %}
+{% from "_alerts.html" import alert %}
+<span class="auth-eyebrow">Two-step verification</span>
+<h1 class="auth-title">Enter your authenticator code</h1>
+<p class="auth-subtitle">Open your authenticator app and enter the current 6-digit code for Vaultly.</p>
 
-    <form method="POST">
-        <input type="text" name="code" placeholder="6-digit code" required maxlength="6">
-        <button type="submit">Verify</button>
-    </form>
+{{ alert(error) }}
 
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
-    {% endif %}
+<form method="POST" class="auth-form">
+    <div class="auth-field">
+        <label class="auth-label" for="code">6-digit code</label>
+        <input class="auth-input auth-input-code" id="code" type="text" name="code" placeholder="123456"
+               required maxlength="6" inputmode="numeric" autocomplete="one-time-code" autofocus>
+    </div>
+    <button type="submit" class="auth-submit">Verify</button>
+</form>
+
+<div class="auth-links">
+    <a href="{{ url_for('two_factor_choose') }}">Use another method</a>
+    <a href="{{ url_for('logout') }}">Start over</a>
 </div>
-
-</body>
-</html>
+{% endblock %}

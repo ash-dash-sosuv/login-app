@@ -1,35 +1,26 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Register</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-{% from "_meme.html" import meme %}
+{% extends "auth_base.html" %}
+{% block title %}Create account{% endblock %}
 
-<div class="container">
-    <h2>Create Account</h2>
+{% block content %}
+{% from "_alerts.html" import alert %}
+<h1 class="auth-title">Create your account</h1>
+<p class="auth-subtitle">Keep your files in a vault only you can open. You'll choose how to verify sign-ins next.</p>
 
-    <form method="POST">
-        <input type="email" name="email" placeholder="Email" required>
+{{ alert(error) }}
 
-        <input
-            type="password"
-            name="password"
-            placeholder="Password"
-            required
-        >
+<form method="POST" class="auth-form">
+    <div class="auth-field">
+        <label class="auth-label" for="email">Email</label>
+        <input class="auth-input" id="email" type="email" name="email" value="{{ request.form.get('email', '') }}"
+               placeholder="you@example.com" autocomplete="email" required autofocus>
+    </div>
+    <div class="auth-field">
+        <label class="auth-label" for="password">Password</label>
+        <input class="auth-input" id="password" type="password" name="password"
+               placeholder="Choose a password" autocomplete="new-password" required>
+    </div>
+    <button type="submit" class="auth-submit">Create account</button>
+</form>
 
-        <button type="submit">Register</button>
-    </form>
-
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {{ meme(meme_for(error)) }}
-    {% endif %}
-
-    <a href="/login">Already have an account?</a>
-</div>
-
-</body>
-</html>
+<p class="auth-switch">Already have an account? <a href="{{ url_for('login') }}">Sign in</a></p>
+{% endblock %}
