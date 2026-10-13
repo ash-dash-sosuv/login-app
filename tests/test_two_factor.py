@@ -387,12 +387,16 @@ class SmsTwoFactorTests(unittest.TestCase):
 
             os.environ["TWILIO_AUTH_TOKEN"] = "token"
             auth_module._twilio_verify_service()
-            client.assert_called_with("AC" + "0" * 32, "token")
+            self.assertEqual(client.call_args.args, ("AC" + "0" * 32, "token"))
 
             os.environ["TWILIO_API_KEY_SID"] = "SK" + "0" * 32
             os.environ["TWILIO_API_KEY_SECRET"] = "secret"
             auth_module._twilio_verify_service()
-            client.assert_called_with("SK" + "0" * 32, "secret", "AC" + "0" * 32)
+            self.assertEqual(client.call_args.args, ("SK" + "0" * 32, "secret", "AC" + "0" * 32))
+            # Calls to Twilio must not be able to hang a request thread.
+            self.assertEqual(
+                client.call_args.kwargs["http_client"].timeout, auth_module.NETWORK_TIMEOUT_SECONDS
+            )
 
     def test_garbled_twilio_secret_shows_error_instead_of_crashing(self):
         os.environ["TWILIO_ACCOUNT_SID"] = "AC" + "0" * 32
@@ -407,6 +411,88 @@ class SmsTwoFactorTests(unittest.TestCase):
         response = self.client.post("/two-factor/choose", data={"method": "sms"})
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"couldn&#39;t send a text", response.data)
+
+
+class RateLimitAndDeliveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.temp_db.close()
+        auth_module.configure_database(f"sqlite:///{self.temp_db.name}")
+        auth_module.init_db()
+        auth_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.client = auth_module.app.test_client()
+        self.user_id, _ = auth_module.create_user("limit@example.com", "password123")
+        auth_module.set_email_2fa(self.user_id, True)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db.name):
+            os.remove(self.temp_db.name)
+
+    def _login(self, password="password123", email="limit@example.com"):
+        return self.client.post("/login", data={"email": email, "password": password})
+
+    def test_password_guessing_on_one_account_is_limited(self):
+        for _ in range(10):
+            self.assertEqual(self._login(password="wrong").status_code, 200)
+
+        blocked = self._login()  # even the right password, once over the limit
+
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn(b"Too many attempts", blocked.data)
+        # Other accounts aren't affected by one account's limit.
+        auth_module.create_user("other@example.com", "password123")
+        self.assertEqual(self._login(email="other@example.com").status_code, 302)
+
+    def test_code_guessing_is_limited(self):
+        self._login()
+        with patch.object(auth_module, "send_otp_email") as send:
+            self.client.post("/two-factor/choose", data={"method": "email"})
+            code = send.call_args.args[1]
+
+        for _ in range(10):
+            self.assertEqual(self.client.post("/two-factor/email", data={"code": "000000"}).status_code, 200)
+        blocked = self.client.post("/two-factor/email", data={"code": code})
+
+        self.assertEqual(blocked.status_code, 429)
+        with self.client.session_transaction() as sess:
+            self.assertNotIn("user_id", sess)
+
+    def test_code_sending_is_limited(self):
+        self._login()
+        with patch.object(auth_module, "send_otp_email") as send:
+            self.client.post("/two-factor/choose", data={"method": "email"})
+            for _ in range(4):
+                self.client.get("/two-factor/email/resend")
+            blocked = self.client.get("/two-factor/email/resend")
+
+        self.assertEqual(send.call_count, 5)
+        self.assertEqual(blocked.status_code, 429)
+
+    def test_email_failure_shows_a_message_instead_of_crashing(self):
+        self._login()
+        with patch.object(
+            auth_module, "send_otp_email", side_effect=auth_module.EmailDeliveryError("timed out")
+        ):
+            response = self.client.post("/two-factor/choose", data={"method": "email"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"couldn&#39;t send an email", response.data)
+
+    def test_smtp_timeout_becomes_delivery_error(self):
+        env = {"SMTP_HOST": "smtp.example.com", "SMTP_PORT": "587"}
+        with patch.dict(os.environ, env), patch.object(
+            auth_module.smtplib, "SMTP", side_effect=TimeoutError("timed out")
+        ) as smtp:
+            with self.assertRaises(auth_module.EmailDeliveryError):
+                auth_module.send_otp_email("someone@example.com", "123456")
+
+        self.assertEqual(smtp.call_args.kwargs["timeout"], auth_module.NETWORK_TIMEOUT_SECONDS)
+
+    def test_limiter_fails_open_when_the_database_errors(self):
+        with patch.object(
+            auth_module, "_increment_counter", side_effect=auth_module.SQLAlchemyError("down")
+        ):
+            self.assertFalse(auth_module.hit_rate_limit("test", "x", 0, 60))
 
 
 class PerUserFileTests(unittest.TestCase):

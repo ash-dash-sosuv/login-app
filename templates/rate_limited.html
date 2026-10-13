@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Too Many Attempts</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+    <h2>Too many attempts</h2>
+    <p class="helper-text">For your security we've paused this for a while. Please wait about {{ minutes }} minute{{ 's' if minutes != 1 else '' }} and try again.</p>
+
+    <a href="javascript:history.back()">Go back</a>
+</div>
+
+</body>
+</html>

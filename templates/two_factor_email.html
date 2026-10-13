@@ -19,6 +19,11 @@
     {% if error %}
     <p class="error">{{ error }}</p>
     {% endif %}
+    {% with messages = get_flashed_messages() %}
+    {% for message in messages %}
+    <p class="error">{{ message }}</p>
+    {% endfor %}
+    {% endwith %}
 
     <a href="/two-factor/email/resend">Resend code</a>
 </div>

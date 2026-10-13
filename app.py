@@ -25,6 +25,7 @@ from flask import (
     session,
     url_for,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 # Load variables from a local .env file (SMTP creds, SECRET_KEY, ...) when
@@ -38,13 +39,14 @@ from sqlalchemy import (
     String,
     Table,
     create_engine,
+    delete,
     inspect,
     insert,
     select,
     text,
     update,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -59,6 +61,15 @@ app = Flask(__name__)
 # The fallback exists only so local development works out of the box.
 app.secret_key = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB per upload request
+app.config["RATELIMIT_ENABLED"] = True
+
+# Behind a reverse proxy (Caddy in docker-compose) every request comes from the
+# proxy's address. TRUSTED_PROXIES=<number of proxies> makes request.remote_addr
+# the real client IP, which rate limiting relies on. Leave it unset when the app
+# is exposed directly, or clients could spoof X-Forwarded-For.
+_trusted_proxies = int(os.environ.get("TRUSTED_PROXIES", "0"))
+if _trusted_proxies:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=_trusted_proxies, x_proto=_trusted_proxies)
 
 # Uploaded files live in a dedicated folder inside the user's Downloads
 # directory, so they're easy to find outside the app too.
@@ -77,6 +88,16 @@ users = Table(
     Column("email_2fa_enabled", Integer, nullable=False, server_default=text("0")),
     Column("phone_number", String(20)),
     Column("sms_2fa_enabled", Integer, nullable=False, server_default=text("0")),
+)
+
+# Fixed-window attempt counters. Kept in the database (not process memory) so
+# limits hold across gunicorn workers and threads.
+rate_limits = Table(
+    "rate_limits",
+    metadata,
+    Column("bucket_key", String(255), primary_key=True),
+    Column("hits", Integer, nullable=False),
+    Column("expires_at", Integer, nullable=False),
 )
 
 
@@ -110,8 +131,10 @@ def _normalize_database_url(url):
 def _build_engine(url):
     connect_args = {}
     if url.startswith("sqlite"):
-        # Flask/gunicorn touch the connection from multiple threads.
+        # Flask/gunicorn touch the connection from multiple threads, and
+        # concurrent writers wait (up to 15s) for SQLite's write lock.
         connect_args["check_same_thread"] = False
+        connect_args["timeout"] = 15
     return create_engine(url, connect_args=connect_args, pool_pre_ping=True, future=True)
 
 
@@ -130,6 +153,9 @@ def init_db():
     logger.info("database_initialization_started")
     metadata.create_all(engine)
     ensure_user_columns()
+    # With `gunicorn --preload` this runs once in the master process; don't let
+    # its pooled connections be inherited by the forked workers.
+    engine.dispose()
     logger.info("database_initialization_completed")
 
 
@@ -289,6 +315,13 @@ def build_qr_code(secret, email):
 
 
 EMAIL_OTP_TTL_SECONDS = 300  # email codes are valid for 5 minutes
+# Upper bound on calls to the mail server and Twilio, so a slow provider fails
+# fast instead of holding a request thread.
+NETWORK_TIMEOUT_SECONDS = 15
+
+
+class EmailDeliveryError(Exception):
+    """Raised when the mail server can't be reached or refuses the message."""
 
 
 def generate_email_otp():
@@ -323,11 +356,16 @@ def send_otp_email(to_email, code):
         "If you didn't try to sign in, you can ignore this email."
     )
 
-    with smtplib.SMTP(host, port) as smtp:
-        smtp.starttls()
-        if username and password:
-            smtp.login(username, password)
-        smtp.send_message(message)
+    try:
+        # A timeout so a slow mail server can't tie up a request thread.
+        with smtplib.SMTP(host, port, timeout=NETWORK_TIMEOUT_SECONDS) as smtp:
+            smtp.starttls()
+            if username and password:
+                smtp.login(username, password)
+            smtp.send_message(message)
+    except (smtplib.SMTPException, OSError) as exc:
+        logger.error("otp_email_failed email=%s host=%s error=%s", _mask_email(to_email), host, type(exc).__name__)
+        raise EmailDeliveryError(str(exc)) from exc
     logger.info("otp_email_sent email=%s host=%s", _mask_email(to_email), host)
 
 
@@ -406,7 +444,10 @@ def _twilio_verify_service():
             logger.error("twilio_config_invalid variable=%s reason=non_alphanumeric_characters", name)
             raise SmsDeliveryError(f"{name} contains invalid characters")
 
-    return Client(*client_args).verify.v2.services(service_sid)
+    from twilio.http.http_client import TwilioHttpClient
+
+    http_client = TwilioHttpClient(timeout=NETWORK_TIMEOUT_SECONDS)
+    return Client(*client_args, http_client=http_client).verify.v2.services(service_sid)
 
 
 def start_sms_otp(phone):
@@ -473,6 +514,113 @@ def verify_sms_otp(phone, code):
 def clear_sms_otp():
     session.pop("sms_otp_hash", None)
     session.pop("sms_otp_expires", None)
+
+
+def _client_ip():
+    return request.remote_addr
+
+
+def _pending_user_id():
+    return session.get("pending_2fa_user_id")
+
+
+def _increment_counter(conn, key, expires_at):
+    if engine.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as upsert
+    else:
+        from sqlalchemy.dialects.sqlite import insert as upsert
+    stmt = upsert(rate_limits).values(bucket_key=key, hits=1, expires_at=expires_at)
+    conn.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[rate_limits.c.bucket_key],
+            set_={"hits": rate_limits.c.hits + 1},
+        )
+    )
+    return conn.execute(select(rate_limits.c.hits).where(rate_limits.c.bucket_key == key)).scalar_one()
+
+
+def hit_rate_limit(bucket, identity, limit, per_seconds):
+    """Record one attempt and return True if it's over `limit` for this window.
+
+    Fails open: if the database is unavailable the request is allowed, so a
+    counter problem can't lock everyone out.
+    """
+    if not app.config.get("RATELIMIT_ENABLED", True):
+        return False
+    now = int(time.time())
+    window = now // per_seconds
+    key = f"{bucket}:{identity}:{window}"
+    try:
+        with engine.begin() as conn:
+            hits = _increment_counter(conn, key, (window + 1) * per_seconds)
+            if secrets.randbelow(100) == 0:
+                conn.execute(delete(rate_limits).where(rate_limits.c.expires_at < now))
+    except SQLAlchemyError:
+        logger.exception("rate_limit_check_failed bucket=%s", bucket)
+        return False
+    return hits > limit
+
+
+def rate_limit(bucket, limit, per_seconds, key=_client_ip, methods=("POST",)):
+    """Allow at most `limit` requests per `per_seconds` for each value of
+    key(); requests where key() returns None aren't counted. Routes that share
+    a bucket share the count."""
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if request.method in methods:
+                identity = key()
+                if identity is not None and hit_rate_limit(bucket, identity, limit, per_seconds):
+                    logger.warning("rate_limited bucket=%s endpoint=%s", bucket, request.endpoint)
+                    minutes = max(1, per_seconds // 60)
+                    return render_template("rate_limited.html", minutes=minutes), 429
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+def _account_id():
+    """The account a code is for: mid-login, or signed in (profile pages)."""
+    return _pending_user_id() or session.get("user_id")
+
+
+def _sends_code():
+    """True when this request makes the app email or text a code."""
+    if request.endpoint in ("two_factor_email_resend", "two_factor_sms_resend"):
+        return True
+    if request.endpoint == "two_factor_choose":
+        return request.form.get("method") in ("email", "sms")
+    return request.form.get("step") == "send"  # SMS number entry
+
+
+def _code_send_account():
+    return _account_id() if _sends_code() else None
+
+
+def _code_send_ip():
+    return _client_ip() if _sends_code() else None
+
+
+def _code_check_account():
+    """Code-entry attempts; the SMS pages' send/restart steps aren't guesses."""
+    if request.form.get("step") in ("send", "restart"):
+        return None
+    return _account_id()
+
+
+def _login_email():
+    return request.form.get("email", "").strip().lower() or None
+
+
+# Limits shared by the routes below (bucket, max requests, window in seconds).
+LOGIN_PER_IP = ("login_ip", 20, 5 * 60)
+LOGIN_PER_ACCOUNT = ("login_account", 10, 15 * 60)
+REGISTER_PER_IP = ("register_ip", 10, 60 * 60)
+CODE_SENDS_PER_ACCOUNT = ("code_send_account", 5, 15 * 60)
+CODE_SENDS_PER_IP = ("code_send_ip", 20, 15 * 60)
+CODE_CHECKS_PER_ACCOUNT = ("code_check_account", 10, 15 * 60)
 
 
 def login_required(view):
@@ -561,6 +709,7 @@ def home():
 
 
 @app.route("/register", methods=["GET", "POST"])
+@rate_limit(*REGISTER_PER_IP)
 def register():
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
@@ -585,6 +734,8 @@ def register():
 
 
 @app.route("/login", methods=["GET", "POST"])
+@rate_limit(*LOGIN_PER_IP)
+@rate_limit(*LOGIN_PER_ACCOUNT, key=_login_email)
 def login():
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
@@ -630,6 +781,8 @@ def _complete_login(user):
 
 
 @app.route("/two-factor/choose", methods=["GET", "POST"])
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account)
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip)
 def two_factor_choose():
     if "pending_2fa_user_id" not in session:
         logger.warning("two_factor_choose_rejected reason=no_pending_user")
@@ -669,7 +822,14 @@ def two_factor_choose():
 
         if method == "email":
             logger.info("two_factor_method_selected method=email enrolling=%s user_id=%s", enrolling, user[0])
-            start_email_otp(session["pending_2fa_email"])
+            try:
+                start_email_otp(session["pending_2fa_email"])
+            except EmailDeliveryError:
+                return render_template(
+                    "two_factor_choose.html",
+                    **choose_context,
+                    error="We couldn't send an email right now. Please try again shortly.",
+                )
             return redirect(url_for("two_factor_email"))
 
         if method == "sms":
@@ -698,6 +858,7 @@ def two_factor_choose():
 
 
 @app.route("/two-factor/setup", methods=["GET", "POST"])
+@rate_limit(*CODE_CHECKS_PER_ACCOUNT, key=_code_check_account)
 def two_factor_setup():
     """Authenticator enrollment for accounts with no verification method yet."""
     if "pending_2fa_user_id" not in session:
@@ -741,6 +902,7 @@ def two_factor_setup():
 
 
 @app.route("/two-factor/verify", methods=["GET", "POST"])
+@rate_limit(*CODE_CHECKS_PER_ACCOUNT, key=_code_check_account)
 def two_factor_verify():
     if "pending_2fa_user_id" not in session:
         logger.warning("two_factor_verify_rejected reason=no_pending_user")
@@ -777,6 +939,7 @@ def two_factor_verify():
 
 
 @app.route("/two-factor/email", methods=["GET", "POST"])
+@rate_limit(*CODE_CHECKS_PER_ACCOUNT, key=_code_check_account)
 def two_factor_email():
     if "pending_2fa_user_id" not in session:
         logger.warning("two_factor_email_rejected reason=no_pending_user")
@@ -815,6 +978,8 @@ def two_factor_email():
 
 
 @app.route("/two-factor/email/resend")
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account, methods=("GET",))
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip, methods=("GET",))
 def two_factor_email_resend():
     if "pending_2fa_user_id" not in session:
         logger.warning("otp_resend_rejected reason=no_pending_user")
@@ -825,12 +990,19 @@ def two_factor_email_resend():
         logger.warning("otp_resend_rejected reason=not_enabled")
         return redirect(url_for("two_factor_choose"))
 
-    start_email_otp(session["pending_2fa_email"])
+    try:
+        start_email_otp(session["pending_2fa_email"])
+    except EmailDeliveryError:
+        flash("We couldn't send a new code right now. Please try again shortly.", "error")
+        return redirect(url_for("two_factor_email"))
     logger.info("otp_resent")
     return redirect(url_for("two_factor_email"))
 
 
 @app.route("/two-factor/sms", methods=["GET", "POST"])
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account)
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip)
+@rate_limit(*CODE_CHECKS_PER_ACCOUNT, key=_code_check_account)
 def two_factor_sms():
     if "pending_2fa_user_id" not in session:
         logger.warning("two_factor_sms_rejected reason=no_pending_user")
@@ -899,6 +1071,8 @@ def two_factor_sms():
 
 
 @app.route("/two-factor/sms/resend")
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account, methods=("GET",))
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip, methods=("GET",))
 def two_factor_sms_resend():
     if "pending_2fa_user_id" not in session:
         logger.warning("sms_otp_resend_rejected reason=no_pending_user")
@@ -1131,6 +1305,9 @@ def profile_email_2fa_disable():
 
 @app.route("/profile/2fa/sms/setup", methods=["GET", "POST"])
 @login_required
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account)
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip)
+@rate_limit(*CODE_CHECKS_PER_ACCOUNT, key=_code_check_account)
 def profile_sms_setup():
     """Two steps on one page: enter a phone number (we text it a code), then
     enter that code to prove ownership before SMS is enabled."""
