@@ -3,6 +3,7 @@
 {% block page_title %}Set Up SMS Verification{% endblock %}
 
 {% block content %}
+{% from "_meme.html" import meme %}
 <div class="breadcrumb"><a href="{{ url_for('profile') }}">Profile</a> &rarr; Set Up SMS Verification</div>
 <h1 class="page-heading">Set Up SMS Verification</h1>
 
@@ -34,6 +35,7 @@
 
     {% if error %}
     <p class="error">{{ error }}</p>
+    {{ meme(meme_for(error)) }}
     {% endif %}
 </div>
 {% endblock %}

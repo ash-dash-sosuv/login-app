@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="app-body">
+{% from "_meme.html" import meme %}
 
 <div class="app-shell">
     <aside class="sidebar">
@@ -53,7 +54,10 @@
                 {% if messages %}
                     <div class="flash-stack">
                         {% for category, message in messages %}
-                            <div class="flash flash-{{ category }}">{{ message }}</div>
+                            <div class="flash flash-{{ category }}">
+                                {{ message }}
+                                {{ meme(meme_for(message, category)) }}
+                            </div>
                         {% endfor %}
                     </div>
                 {% endif %}

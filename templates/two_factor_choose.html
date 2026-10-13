@@ -5,6 +5,7 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+{% from "_meme.html" import meme %}
 
 <div class="container">
     {% if enrolling %}
@@ -32,6 +33,7 @@
 
     {% if error %}
     <p class="error">{{ error }}</p>
+    {{ meme(meme_for(error)) }}
     {% endif %}
 </div>
 

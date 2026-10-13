@@ -346,6 +346,30 @@ body.app-body {
     color: #7f1d1d;
 }
 
+/* --- Memes under messages --- */
+
+.meme {
+    margin: 14px 0 4px;
+    text-align: center;
+}
+
+.meme img {
+    display: inline-block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+}
+
+.flash .meme {
+    margin: 10px 0 2px;
+    text-align: left;
+}
+
+.flash .meme img {
+    max-width: min(280px, 100%);
+}
+
 /* --- Stat cards --- */
 
 .stat-grid {

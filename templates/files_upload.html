@@ -20,6 +20,13 @@
         <div id="upload-progress-label" class="progress-label">Uploading&hellip;</div>
     </div>
 
+    {# Filled in by the script with the meme the server sends back. The
+       fallback is for when the connection drops and there's no reply. #}
+    <figure id="upload-meme" class="meme" hidden
+            data-fallback='{{ meme_by_key("upload_failed")|tojson }}'>
+        <img id="upload-meme-img" alt="" width="360" referrerpolicy="no-referrer">
+    </figure>
+
     <noscript><button type="submit" class="btn btn-primary">Upload</button></noscript>
 </form>
 
@@ -53,6 +60,25 @@
     const tableBody = document.getElementById("file-table-body");
     const emptyState = document.getElementById("empty-state");
     const countLabel = document.getElementById("file-count-label");
+    const memeFigure = document.getElementById("upload-meme");
+    const memeImg = document.getElementById("upload-meme-img");
+    let fallbackMeme = null;
+    try {
+        fallbackMeme = JSON.parse(memeFigure.dataset.fallback);
+    } catch (err) {
+        fallbackMeme = null;
+    }
+
+    function showMeme(meme) {
+        if (!meme || !meme.url) {
+            memeFigure.hidden = true;
+            return;
+        }
+        memeImg.src = meme.url;
+        memeImg.alt = meme.alt || "";
+        memeFigure.hidden = false;
+    }
+    memeImg.addEventListener("error", () => { memeFigure.hidden = true; });
 
     // Chrome's default action for a drop that no script handles is to
     // navigate the tab to open the dropped file. A drop that lands even a
@@ -120,6 +146,7 @@
         xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
 
         progressWrap.hidden = false;
+        showMeme(null);
         progressBar.style.width = "0%";
         progressLabel.textContent = "Uploading…";
 
@@ -148,21 +175,28 @@
                 data = null;
             }
 
+            showMeme((data && data.meme) || (xhr.status >= 400 ? fallbackMeme : null));
+
             if (xhr.status === 401) {
                 finish((data && data.error) || "Your session has expired. Please sign in again.", 4000);
-                setTimeout(() => { window.location.href = "/login"; }, 2000);
+                setTimeout(() => { window.location.href = "/login"; }, 4000);
                 return;
             }
             if (xhr.status >= 200 && xhr.status < 300 && data && data.files) {
                 progressBar.style.width = "100%";
                 renderRows(data.files);
-                finish(data.error || "Upload complete", data.error ? 6000 : 1200);
+                let message = data.error || "Upload complete";
+                if (!data.error && data.skipped && data.skipped.length && !(data.saved && data.saved.length)) {
+                    message = "Skipped " + data.skipped.length + " file(s) with an invalid name.";
+                }
+                finish(message, message === "Upload complete" ? 1200 : 6000);
                 return;
             }
             finish((data && data.error) || "Upload failed. Please try again.", 6000);
         };
 
         xhr.onerror = () => {
+            showMeme(fallbackMeme);
             finish("Upload failed. Check your connection and try again.", 6000);
         };
 

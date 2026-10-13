@@ -5,6 +5,7 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+{% from "_meme.html" import meme %}
 
 <div class="container">
     <h2>Login</h2>
@@ -29,6 +30,7 @@
 
     {% if error %}
     <p class="error">{{ error }}</p>
+    {{ meme(meme_for(error)) }}
     {% endif %}
 
     <a href="/register">Create an account</a>

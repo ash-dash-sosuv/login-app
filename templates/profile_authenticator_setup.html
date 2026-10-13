@@ -3,6 +3,7 @@
 {% block page_title %}Set Up Authenticator{% endblock %}
 
 {% block content %}
+{% from "_meme.html" import meme %}
 <div class="breadcrumb"><a href="{{ url_for('profile') }}">Profile</a> &rarr; Set Up Authenticator</div>
 <h1 class="page-heading">Set Up Authenticator App</h1>
 <p class="page-subheading">Scan this QR code with Google Authenticator or another TOTP app.</p>
@@ -19,6 +20,7 @@
 
     {% if error %}
     <p class="error">{{ error }}</p>
+    {{ meme(meme_for(error)) }}
     {% endif %}
 
     <div class="secret-box">

@@ -5,10 +5,12 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+{% from "_meme.html" import meme %}
 
 <div class="container">
     <h2>{{ title }}</h2>
     <p class="helper-text">{{ message }}</p>
+    {{ meme(meme_for_status(status)) }}
 
     {% if session.get("user_id") %}
     <a href="/dashboard">Go to your dashboard</a>

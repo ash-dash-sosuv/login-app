@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pyotp
 
 import app as auth_module
+import memes
 
 
 class TwoFactorAuthTests(unittest.TestCase):
@@ -672,6 +673,86 @@ class ErrorHandlingTests(unittest.TestCase):
         with patch.dict(os.environ, {"SMTP_HOST": "smtp.example.com"}), patch.object(auth_module.smtplib, "SMTP"):
             with self.assertRaises(auth_module.EmailDeliveryError):
                 auth_module.send_otp_email("a@b.com\nBcc: c@d.com", "123456")
+
+
+class MemeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.temp_db.close()
+        auth_module.configure_database(f"sqlite:///{self.temp_db.name}")
+        auth_module.init_db()
+        auth_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.client = auth_module.app.test_client()
+        env = patch.dict(os.environ, {"MEMES_ENABLED": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db.name):
+            os.remove(self.temp_db.name)
+
+    def _url(self, key):
+        return memes.meme_url(key).replace("&", "&amp;").encode()
+
+    def test_every_rule_and_status_points_at_a_real_meme(self):
+        for _, _, key in memes.RULES:
+            self.assertIn(key, memes.MEMES)
+        for key in list(memes.STATUS_MEMES.values()) + list(memes.DEFAULT_FOR_KIND.values()):
+            self.assertIn(key, memes.MEMES)
+
+    def test_messages_map_to_their_memes(self):
+        cases = [
+            ("Invalid email or password", "error", "wrong_login"),
+            ("Invalid or expired code. Please try again.", "error", "wrong_code"),
+            ("Invalid code. Please try again.", "error", "wrong_authenticator_code"),
+            ("We couldn't send a text message right now.", "error", "send_failed"),
+            ("New password and confirmation do not match.", "error", "password_mismatch"),
+            ("Something nobody planned for", "error", "generic_error"),
+            ("Password updated successfully.", "success", "password_updated"),
+            ("SMS verification disabled and phone number removed.", "success", "method_disabled"),
+            ("Email verification enabled.", "success", "method_enabled"),
+        ]
+        for message, kind, key in cases:
+            self.assertEqual(memes.meme_for(message, kind)["url"], memes.meme_url(key), message)
+
+    def test_captions_are_escaped_for_memegen(self):
+        self.assertEqual(memes._escape_line("Why? 50% off_now - #1/2"), "Why~q_50~p_off__now_--_~h1~s2")
+        self.assertEqual(memes._escape_line(""), "_")
+
+    def test_wrong_password_shows_a_meme(self):
+        auth_module.create_user("meme@example.com", "password123")
+        response = self.client.post("/login", data={"email": "meme@example.com", "password": "nope"})
+        self.assertIn(self._url("wrong_login"), response.data)
+        self.assertIn(b"referrerpolicy=\"no-referrer\"", response.data)
+
+    def test_flash_messages_in_the_app_show_memes(self):
+        user_id, _ = auth_module.create_user("meme@example.com", "password123")
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = user_id
+            sess["email"] = "meme@example.com"
+        response = self.client.post(
+            "/profile/change-password",
+            data={"current_password": "password123", "new_password": "newpassword1", "confirm_password": "newpassword1"},
+            follow_redirects=True,
+        )
+        self.assertIn(self._url("password_updated"), response.data)
+
+    def test_error_and_rate_limit_pages_show_memes(self):
+        self.assertIn(self._url("not_found"), self.client.get("/no-such-page").data)
+        with patch.object(auth_module, "hit_rate_limit", return_value=True):
+            limited = self.client.post("/login", data={"email": "x@example.com", "password": "x"})
+        self.assertIn(self._url("rate_limited"), limited.data)
+
+    def test_json_errors_include_a_meme(self):
+        response = self.client.post("/files/upload", headers={"X-Requested-With": "XMLHttpRequest"})
+        self.assertEqual(response.get_json()["meme"]["url"], memes.meme_url("session_expired"))
+
+    def test_memes_can_be_turned_off(self):
+        auth_module.create_user("meme@example.com", "password123")
+        with patch.dict(os.environ, {"MEMES_ENABLED": "0"}):
+            response = self.client.post("/login", data={"email": "meme@example.com", "password": "nope"})
+        self.assertIn(b"Invalid email or password", response.data)
+        self.assertNotIn(b"memegen", response.data)
 
 
 class PerUserFileTests(unittest.TestCase):

@@ -50,6 +50,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import generate_password_hash, check_password_hash
 
+import memes
+
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -77,6 +79,12 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
 MAX_UPLOAD_MB = 500
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024  # per upload request
 app.config["RATELIMIT_ENABLED"] = True
+# Templates show a meme under messages: {{ meme(meme_for(error)) }}.
+app.jinja_env.globals.update(
+    meme_for=memes.meme_for,
+    meme_by_key=memes.meme_by_key,
+    meme_for_status=memes.meme_for_status,
+)
 
 # Behind a reverse proxy (Caddy in docker-compose) every request comes from the
 # proxy's address. TRUSTED_PROXIES=<number of proxies> makes request.remote_addr
@@ -697,7 +705,10 @@ def login_required(view):
         # Views read both keys; a session missing either isn't a usable login.
         if "user_id" not in session or "email" not in session:
             if _wants_json():
-                return jsonify(error="Your session has expired. Please sign in again."), 401
+                return jsonify(
+                    error="Your session has expired. Please sign in again.",
+                    meme=memes.meme_by_key("session_expired"),
+                ), 401
             return redirect(url_for("login"))
         return view(*args, **kwargs)
 
@@ -1238,11 +1249,18 @@ def files_upload():
             else None
         )
         if _wants_json():
+            if failed:
+                meme = memes.meme_by_key("upload_failed")
+            elif saved:
+                meme = memes.meme_by_key("uploaded")
+            else:
+                meme = memes.meme_by_key("invalid_filename") if skipped else None
             return jsonify(
                 saved=saved,
                 skipped=skipped,
                 failed=failed,
                 error=failed_message,
+                meme=meme,
                 files=list_uploaded_files(user_dir),
             )
 
@@ -1506,7 +1524,7 @@ def error_response(status, name=None):
         status, (name or "Something went wrong", "That request couldn't be completed. Please try again.")
     )
     if _wants_json():
-        return jsonify(error=message), status
+        return jsonify(error=message, meme=memes.meme_for_status(status)), status
     return render_template("error.html", title=title, message=message, status=status), status
 
 
