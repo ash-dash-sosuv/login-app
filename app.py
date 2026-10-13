@@ -74,7 +74,7 @@ users = Table(
     Column("password", String(255), nullable=False),
     Column("two_factor_enabled", Integer, nullable=False, server_default=text("0")),
     Column("two_factor_secret", String(64)),
-    Column("email_2fa_enabled", Integer, nullable=False, server_default=text("1")),
+    Column("email_2fa_enabled", Integer, nullable=False, server_default=text("0")),
     Column("phone_number", String(20)),
     Column("sms_2fa_enabled", Integer, nullable=False, server_default=text("0")),
 )
@@ -186,7 +186,7 @@ def create_user(email, password):
                 password=hashed_password,
                 two_factor_enabled=0,
                 two_factor_secret=secret,
-                email_2fa_enabled=1,
+                email_2fa_enabled=0,
             )
         )
         user_id = result.inserted_primary_key[0]
@@ -605,6 +605,30 @@ def login():
     return render_template("login.html")
 
 
+def login_methods(user):
+    """The verification methods this user has turned on, keyed by method."""
+    return {
+        "email": bool(user[5]),
+        "sms": bool(user[7] and user[6]),
+        "authenticator": user[3] == 1,
+    }
+
+
+def needs_enrollment(user):
+    """True for accounts with no verification method yet: new sign-ups (and
+    sign-ups abandoned before finishing). Only these may set a method up during
+    sign-in; everyone else adds methods from the profile page, so a stolen
+    password can't be used to enroll an attacker's phone or app."""
+    return not any(login_methods(user).values())
+
+
+def _complete_login(user):
+    session["user_id"] = user[0]
+    session["email"] = user[1]
+    for key in ("pending_2fa_user_id", "pending_2fa_email", "pending_2fa_secret", "pending_sms_phone"):
+        session.pop(key, None)
+
+
 @app.route("/two-factor/choose", methods=["GET", "POST"])
 def two_factor_choose():
     if "pending_2fa_user_id" not in session:
@@ -612,35 +636,47 @@ def two_factor_choose():
         return redirect(url_for("login"))
 
     user = get_user_by_id(session["pending_2fa_user_id"])
-    email_enabled = bool(user[5]) if user else True
-    sms_enabled = bool(user and user[7] and user[6])
+    if not user:
+        logger.error("two_factor_choose_failed reason=user_not_found")
+        session.clear()
+        return redirect(url_for("login"))
+
+    enrolling = needs_enrollment(user)
+    # While enrolling every method is on offer; afterwards only enabled ones.
+    methods = {m: True for m in login_methods(user)} if enrolling else login_methods(user)
     choose_context = {
-        "email_enabled": email_enabled,
-        "sms_enabled": sms_enabled,
-        "masked_phone": _mask_phone(user[6]) if sms_enabled else None,
+        "enrolling": enrolling,
+        "email_enabled": methods["email"],
+        "sms_enabled": methods["sms"],
+        "authenticator_enabled": methods["authenticator"],
+        "masked_phone": _mask_phone(user[6]) if not enrolling and methods["sms"] else None,
     }
 
     if request.method == "POST":
         method = request.form.get("method")
 
-        if method == "authenticator":
-            if user and user[3] == 1:
-                logger.info("two_factor_method_selected method=authenticator user_id=%s", user[0])
-                return redirect(url_for("two_factor_verify"))
-            logger.info("two_factor_method_selected method=authenticator action=setup")
-            return redirect(url_for("two_factor_setup"))
+        if method in methods and not methods[method]:
+            logger.warning("two_factor_method_rejected reason=not_enabled method=%s user_id=%s", method, user[0])
+            return render_template(
+                "two_factor_choose.html",
+                **choose_context,
+                error="That method isn't set up for your account. Please choose another.",
+            )
 
-        if method == "email" and email_enabled:
-            logger.info("two_factor_method_selected method=email")
+        if method == "authenticator":
+            logger.info("two_factor_method_selected method=authenticator enrolling=%s user_id=%s", enrolling, user[0])
+            return redirect(url_for("two_factor_setup" if enrolling else "two_factor_verify"))
+
+        if method == "email":
+            logger.info("two_factor_method_selected method=email enrolling=%s user_id=%s", enrolling, user[0])
             start_email_otp(session["pending_2fa_email"])
             return redirect(url_for("two_factor_email"))
 
-        if method == "sms" and user:
-            if not sms_enabled:
-                # No verified phone yet: ask for one on the SMS page.
-                logger.info("two_factor_method_selected method=sms action=enroll user_id=%s", user[0])
+        if method == "sms":
+            logger.info("two_factor_method_selected method=sms enrolling=%s user_id=%s", enrolling, user[0])
+            if enrolling:
+                # Ask for a number on the SMS page; it's saved once verified.
                 return redirect(url_for("two_factor_sms"))
-            logger.info("two_factor_method_selected method=sms user_id=%s", user[0])
             try:
                 start_sms_otp(user[6])
             except SmsDeliveryError:
@@ -663,52 +699,45 @@ def two_factor_choose():
 
 @app.route("/two-factor/setup", methods=["GET", "POST"])
 def two_factor_setup():
+    """Authenticator enrollment for accounts with no verification method yet."""
     if "pending_2fa_user_id" not in session:
         logger.warning("two_factor_setup_rejected reason=no_pending_user")
         return redirect(url_for("login"))
 
-    user_id = session["pending_2fa_user_id"]
-    user = get_user_by_id(user_id)
+    user = get_user_by_id(session["pending_2fa_user_id"])
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+    if login_methods(user)["authenticator"]:
+        return redirect(url_for("two_factor_verify"))
+    if not needs_enrollment(user):
+        logger.warning("two_factor_setup_rejected user_id=%s reason=enrollment_during_login", user[0])
+        return redirect(url_for("two_factor_choose"))
 
-    if user and user[3] == 1:
-        session["user_id"] = user[0]
-        session["email"] = user[1]
-        session.pop("pending_2fa_user_id", None)
-        session.pop("pending_2fa_secret", None)
-        logger.info("two_factor_setup_skipped user_id=%s reason=already_enabled", user[0])
-        return redirect(url_for("dashboard"))
+    secret = user[4]
+    email = user[1]
 
-    secret = session.get("pending_2fa_secret") or user[4]
-    email = session.get("pending_2fa_email") or user[1]
-
-    if request.method == "POST":
-        code = request.form.get("code", "").strip()
-        totp = pyotp.TOTP(secret)
-
-        if totp.verify(code, valid_window=1):
-            update_two_factor_setup(user_id, secret)
-            session["user_id"] = user_id
-            session["email"] = email
-            session.pop("pending_2fa_user_id", None)
-            session.pop("pending_2fa_secret", None)
-            logger.info("two_factor_setup_verified user_id=%s", user_id)
-            return redirect(url_for("dashboard"))
-
-        logger.warning("two_factor_setup_rejected user_id=%s reason=invalid_code", user_id)
+    def render(error=None):
         return render_template(
             "two_factor_setup.html",
             email=email,
             qr_code=build_qr_code(secret, email),
             secret=secret,
-            error="Invalid code. Please try again.",
+            error=error,
         )
 
-    return render_template(
-        "two_factor_setup.html",
-        email=email,
-        qr_code=build_qr_code(secret, email),
-        secret=secret,
-    )
+    if request.method == "POST":
+        code = request.form.get("code", "").strip()
+        if pyotp.TOTP(secret).verify(code, valid_window=1):
+            update_two_factor_setup(user[0], secret)
+            _complete_login(user)
+            logger.info("two_factor_setup_verified user_id=%s", user[0])
+            return redirect(url_for("dashboard"))
+
+        logger.warning("two_factor_setup_rejected user_id=%s reason=invalid_code", user[0])
+        return render("Invalid code. Please try again.")
+
+    return render()
 
 
 @app.route("/two-factor/verify", methods=["GET", "POST"])
@@ -725,16 +754,19 @@ def two_factor_verify():
         session.clear()
         return redirect(url_for("login"))
 
+    # Every account has a secret from registration; only accept codes once the
+    # user has actually set the authenticator up.
+    if not login_methods(user)["authenticator"]:
+        logger.warning("two_factor_verify_rejected user_id=%s reason=not_enabled", user_id)
+        return redirect(url_for("two_factor_choose"))
+
     if request.method == "POST":
         code = request.form.get("code", "").strip()
         secret = user[4]
         totp = pyotp.TOTP(secret)
 
         if totp.verify(code, valid_window=1):
-            session["user_id"] = user[0]
-            session["email"] = user[1]
-            session.pop("pending_2fa_user_id", None)
-            session.pop("pending_2fa_secret", None)
+            _complete_login(user)
             logger.info("two_factor_verified user_id=%s", user_id)
             return redirect(url_for("dashboard"))
 
@@ -756,17 +788,20 @@ def two_factor_email():
         session.clear()
         return redirect(url_for("login"))
 
+    enrolling = needs_enrollment(user)
+    if not enrolling and not login_methods(user)["email"]:
+        logger.warning("two_factor_email_rejected user_id=%s reason=not_enabled", user[0])
+        return redirect(url_for("two_factor_choose"))
+
     if request.method == "POST":
         code = request.form.get("code", "").strip()
 
         if verify_email_otp(code):
-            session["user_id"] = user[0]
-            session["email"] = user[1]
+            if enrolling:
+                set_email_2fa(user[0], True)
             clear_email_otp()
-            session.pop("pending_2fa_user_id", None)
-            session.pop("pending_2fa_email", None)
-            session.pop("pending_2fa_secret", None)
-            logger.info("two_factor_email_verified user_id=%s", user[0])
+            _complete_login(user)
+            logger.info("two_factor_email_verified user_id=%s enrolled=%s", user[0], enrolling)
             return redirect(url_for("dashboard"))
 
         logger.warning("two_factor_email_rejected user_id=%s reason=invalid_or_expired_code", user[0])
@@ -784,6 +819,11 @@ def two_factor_email_resend():
     if "pending_2fa_user_id" not in session:
         logger.warning("otp_resend_rejected reason=no_pending_user")
         return redirect(url_for("login"))
+
+    user = get_user_by_id(session["pending_2fa_user_id"])
+    if not user or not (needs_enrollment(user) or login_methods(user)["email"]):
+        logger.warning("otp_resend_rejected reason=not_enabled")
+        return redirect(url_for("two_factor_choose"))
 
     start_email_otp(session["pending_2fa_email"])
     logger.info("otp_resent")
@@ -803,9 +843,13 @@ def two_factor_sms():
         return redirect(url_for("login"))
 
     # Users with a verified phone get a code straight away (sent from the
-    # choose page). Users without one first enter a number here; it's saved to
-    # their account only after they prove they own it by entering the code.
-    enrolled_phone = user[6] if user[7] else None
+    # choose page). Accounts with no method yet may enter a number here; it's
+    # saved only after they prove they own it by entering the code.
+    enrolled_phone = user[6] if login_methods(user)["sms"] else None
+    enrolling = needs_enrollment(user)
+    if not enrolled_phone and not enrolling:
+        logger.warning("two_factor_sms_rejected user_id=%s reason=not_enabled", user[0])
+        return redirect(url_for("two_factor_choose"))
     target_phone = enrolled_phone or session.get("pending_sms_phone")
 
     def render(error=None):
@@ -820,7 +864,7 @@ def two_factor_sms():
     if request.method == "POST":
         step = request.form.get("step", "verify")
 
-        if step == "send" and not enrolled_phone:
+        if step == "send" and enrolling:
             phone = normalize_phone_number(request.form.get("phone", ""))
             if not phone:
                 return render("Enter your number in international format, e.g. +14155552671.")
@@ -832,7 +876,7 @@ def two_factor_sms():
             logger.info("two_factor_sms_enroll_code_sent user_id=%s phone=%s", user[0], _mask_phone(phone))
             return redirect(url_for("two_factor_sms"))
 
-        if step == "restart" and not enrolled_phone:
+        if step == "restart" and enrolling:
             clear_sms_otp()
             session.pop("pending_sms_phone", None)
             return redirect(url_for("two_factor_sms"))
@@ -841,16 +885,11 @@ def two_factor_sms():
             code = request.form.get("code", "").strip()
 
             if verify_sms_otp(target_phone, code):
-                if not enrolled_phone:
+                if enrolling:
                     set_sms_2fa(user[0], target_phone)
-                session["user_id"] = user[0]
-                session["email"] = user[1]
                 clear_sms_otp()
-                session.pop("pending_sms_phone", None)
-                session.pop("pending_2fa_user_id", None)
-                session.pop("pending_2fa_email", None)
-                session.pop("pending_2fa_secret", None)
-                logger.info("two_factor_sms_verified user_id=%s enrolled=%s", user[0], not enrolled_phone)
+                _complete_login(user)
+                logger.info("two_factor_sms_verified user_id=%s enrolled=%s", user[0], enrolling)
                 return redirect(url_for("dashboard"))
 
             logger.warning("two_factor_sms_rejected user_id=%s reason=invalid_or_expired_code", user[0])
@@ -869,7 +908,12 @@ def two_factor_sms_resend():
     if not user:
         return redirect(url_for("login"))
 
-    phone = (user[6] if user[7] else None) or session.get("pending_sms_phone")
+    if login_methods(user)["sms"]:
+        phone = user[6]
+    elif needs_enrollment(user):
+        phone = session.get("pending_sms_phone")
+    else:
+        return redirect(url_for("two_factor_choose"))
     if not phone:
         return redirect(url_for("two_factor_sms"))
 

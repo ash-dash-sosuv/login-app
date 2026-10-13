@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pyotp
+
 import app as auth_module
 
 
@@ -53,20 +55,117 @@ class TwoFactorAuthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], "/two-factor/choose")
 
-    def test_choosing_authenticator_goes_to_setup(self):
-        auth_module.create_user("auth@example.com", "password123")
-        self.client.post(
-            "/login",
-            data={"email": "auth@example.com", "password": "password123"},
-        )
+    def _log_in_with_password(self, email):
+        self.client.post("/login", data={"email": email, "password": "password123"})
 
-        response = self.client.post(
-            "/two-factor/choose",
-            data={"method": "authenticator"},
-            follow_redirects=False,
-        )
+    def _email_only_user(self, email):
+        """An established account whose only method is email codes."""
+        user_id, secret = auth_module.create_user(email, "password123")
+        auth_module.set_email_2fa(user_id, True)
+        return user_id, secret
 
-        self.assertEqual(response.headers["Location"], "/two-factor/setup")
+    def test_new_account_starts_with_no_method_and_may_choose_any(self):
+        user_id, _ = auth_module.create_user("new@example.com", "password123")
+        self._log_in_with_password("new@example.com")
+
+        user = auth_module.get_user_by_id(user_id)
+        self.assertEqual((user[3], user[5], user[7]), (0, 0, 0))
+
+        page = self.client.get("/two-factor/choose").data
+        self.assertIn(b"Secure your account", page)
+        for method in (b"email", b"sms", b"authenticator"):
+            self.assertIn(b'value="' + method + b'" class="choice-btn">', page)
+
+    def test_new_account_can_enroll_authenticator(self):
+        user_id, secret = auth_module.create_user("auth@example.com", "password123")
+        self._log_in_with_password("auth@example.com")
+
+        choose = self.client.post("/two-factor/choose", data={"method": "authenticator"})
+        self.assertEqual(choose.headers["Location"], "/two-factor/setup")
+        self.assertIn(secret.encode(), self.client.get("/two-factor/setup").data)
+
+        setup = self.client.post("/two-factor/setup", data={"code": pyotp.TOTP(secret).now()})
+
+        self.assertEqual(setup.headers["Location"], "/dashboard")
+        user = auth_module.get_user_by_id(user_id)
+        self.assertEqual((user[3], user[5]), (1, 0))
+
+    def test_new_account_enrolling_email_turns_email_on(self):
+        user_id, _ = auth_module.create_user("mail@example.com", "password123")
+        self._log_in_with_password("mail@example.com")
+
+        with patch.object(auth_module, "send_otp_email") as mock_send:
+            self.client.post("/two-factor/choose", data={"method": "email"})
+            code = mock_send.call_args.args[1]
+        verify = self.client.post("/two-factor/email", data={"code": code})
+
+        self.assertEqual(verify.headers["Location"], "/dashboard")
+        self.assertEqual(auth_module.get_user_by_id(user_id)[5], 1)
+
+    def test_methods_not_enabled_are_disabled_on_choose_page(self):
+        self._email_only_user("old@example.com")
+        self._log_in_with_password("old@example.com")
+
+        page = self.client.get("/two-factor/choose").data
+
+        self.assertIn(b'value="email" class="choice-btn">', page)
+        self.assertIn(b'value="sms" class="choice-btn" disabled', page)
+        self.assertIn(b'value="authenticator" class="choice-btn" disabled', page)
+
+    def test_choosing_authenticator_that_is_not_enabled_is_rejected(self):
+        self._email_only_user("auth@example.com")
+        self._log_in_with_password("auth@example.com")
+
+        response = self.client.post("/two-factor/choose", data={"method": "authenticator"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"isn&#39;t set up for your account", response.data)
+
+    def test_authenticator_cannot_be_enrolled_or_used_during_login_when_not_enabled(self):
+        _, secret = self._email_only_user("auth@example.com")
+        self._log_in_with_password("auth@example.com")
+
+        setup_page = self.client.get("/two-factor/setup")
+        setup_post = self.client.post("/two-factor/setup", data={"code": pyotp.TOTP(secret).now()})
+        verify = self.client.post("/two-factor/verify", data={"code": pyotp.TOTP(secret).now()})
+
+        for response in (setup_page, setup_post, verify):
+            self.assertEqual(response.headers["Location"], "/two-factor/choose")
+        with self.client.session_transaction() as sess:
+            self.assertNotIn("user_id", sess)
+
+    def test_enabled_authenticator_requires_a_code(self):
+        user_id, secret = auth_module.create_user("auth@example.com", "password123")
+        auth_module.update_two_factor_setup(user_id, secret)
+        self._log_in_with_password("auth@example.com")
+
+        choose = self.client.post("/two-factor/choose", data={"method": "authenticator"})
+        setup = self.client.get("/two-factor/setup")
+
+        self.assertEqual(choose.headers["Location"], "/two-factor/verify")
+        # Visiting the old setup URL must not sign the user in.
+        self.assertEqual(setup.headers["Location"], "/two-factor/verify")
+        with self.client.session_transaction() as sess:
+            self.assertNotIn("user_id", sess)
+
+        verify = self.client.post("/two-factor/verify", data={"code": pyotp.TOTP(secret).now()})
+        self.assertEqual(verify.headers["Location"], "/dashboard")
+
+    def test_email_codes_are_refused_when_email_is_disabled(self):
+        user_id, secret = auth_module.create_user("noemail@example.com", "password123")
+        auth_module.update_two_factor_setup(user_id, secret)
+        auth_module.set_email_2fa(user_id, False)
+        self._log_in_with_password("noemail@example.com")
+
+        with patch.object(auth_module, "start_email_otp") as send:
+            choose = self.client.post("/two-factor/choose", data={"method": "email"})
+            resend = self.client.get("/two-factor/email/resend")
+            page = self.client.get("/two-factor/email")
+
+        send.assert_not_called()
+        self.assertIn(b"isn&#39;t set up for your account", choose.data)
+        self.assertEqual(resend.headers["Location"], "/two-factor/choose")
+        self.assertEqual(page.headers["Location"], "/two-factor/choose")
 
     def test_email_otp_flow_logs_user_in(self):
         auth_module.create_user("mailer@example.com", "password123")
@@ -159,11 +258,9 @@ class SmsTwoFactorTests(unittest.TestCase):
         self.assertIsNone(auth_module.normalize_phone_number("4155552671"))
         self.assertIsNone(auth_module.normalize_phone_number("+0123456789"))
 
-    def test_sms_login_asks_for_number_when_none_enrolled(self):
+    def test_new_account_can_enroll_sms(self):
         user_id, _ = auth_module.create_user("nophone@example.com", "password123")
         self._login_with_password("nophone@example.com")
-
-        self.assertIn(b'value="sms"', self.client.get("/two-factor/choose").data)
 
         choose = self.client.post("/two-factor/choose", data={"method": "sms"})
         self.assertEqual(choose.headers["Location"], "/two-factor/sms")
@@ -186,8 +283,26 @@ class SmsTwoFactorTests(unittest.TestCase):
         self.assertEqual(verify.headers["Location"], "/dashboard")
 
         user = auth_module.get_user_by_id(user_id)
-        self.assertEqual(user[6], self.PHONE)
-        self.assertEqual(user[7], 1)
+        self.assertEqual((user[6], user[7], user[5]), (self.PHONE, 1, 0))
+
+    def test_sms_cannot_be_enrolled_during_login_once_another_method_exists(self):
+        user_id, _ = auth_module.create_user("nophone@example.com", "password123")
+        auth_module.set_email_2fa(user_id, True)
+        self._login_with_password("nophone@example.com")
+
+        self.assertIn(b'value="sms" class="choice-btn" disabled', self.client.get("/two-factor/choose").data)
+
+        with patch.object(auth_module, "start_sms_otp") as send:
+            choose = self.client.post("/two-factor/choose", data={"method": "sms"})
+            page = self.client.get("/two-factor/sms")
+            enroll = self.client.post("/two-factor/sms", data={"step": "send", "phone": "+1 415 555 2671"})
+            resend = self.client.get("/two-factor/sms/resend")
+
+        send.assert_not_called()
+        self.assertIn(b"isn&#39;t set up for your account", choose.data)
+        for response in (page, enroll, resend):
+            self.assertEqual(response.headers["Location"], "/two-factor/choose")
+        self.assertIsNone(auth_module.get_user_by_id(user_id)[6])
 
     def test_profile_enrollment_then_sms_login(self):
         user_id, _ = auth_module.create_user("sms@example.com", "password123")
@@ -285,11 +400,11 @@ class SmsTwoFactorTests(unittest.TestCase):
         os.environ["TWILIO_API_KEY_SID"] = "SK" + "0" * 32
         os.environ["TWILIO_API_KEY_SECRET"] = "abcdefghijąklmnop"
 
-        auth_module.create_user("garbled@example.com", "password123")
+        user_id, _ = auth_module.create_user("garbled@example.com", "password123")
+        auth_module.set_sms_2fa(user_id, self.PHONE)
         self._login_with_password("garbled@example.com")
-        self.client.post("/two-factor/choose", data={"method": "sms"})
 
-        response = self.client.post("/two-factor/sms", data={"step": "send", "phone": self.PHONE})
+        response = self.client.post("/two-factor/choose", data={"method": "sms"})
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"couldn&#39;t send a text", response.data)
 

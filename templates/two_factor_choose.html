@@ -1,26 +1,32 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Choose Verification Method</title>
+    <title>{{ 'Set Up Verification' if enrolling else 'Choose Verification Method' }}</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
 <div class="container">
+    {% if enrolling %}
+    <h2>Secure your account</h2>
+    <p class="helper-text">Choose how you'd like to verify it's you each time you sign in. You can add more methods later from your profile.</p>
+    {% else %}
     <h2>Verify it's you</h2>
     <p class="helper-text">Choose how you'd like to receive your verification code.</p>
+    {% endif %}
 
     <form method="POST">
-        {% if email_enabled %}
-        <button type="submit" name="method" value="email" class="choice-btn">
+        <button type="submit" name="method" value="email" class="choice-btn"{% if not email_enabled %} disabled{% endif %}>
             📧&nbsp; Email me a code
+            {% if not email_enabled %}<span class="choice-note">Not enabled for your account</span>{% endif %}
         </button>
-        {% endif %}
-        <button type="submit" name="method" value="sms" class="choice-btn">
-            💬&nbsp; {% if sms_enabled %}Text a code to {{ masked_phone }}{% else %}Text a code to my mobile number{% endif %}
+        <button type="submit" name="method" value="sms" class="choice-btn"{% if not sms_enabled %} disabled{% endif %}>
+            💬&nbsp; {% if masked_phone %}Text a code to {{ masked_phone }}{% else %}Text a code to my mobile number{% endif %}
+            {% if not sms_enabled %}<span class="choice-note">Not set up — add a number from your profile</span>{% endif %}
         </button>
-        <button type="submit" name="method" value="authenticator" class="choice-btn">
-            📱&nbsp; Use my authenticator app
+        <button type="submit" name="method" value="authenticator" class="choice-btn"{% if not authenticator_enabled %} disabled{% endif %}>
+            📱&nbsp; Use {{ 'an' if enrolling else 'my' }} authenticator app
+            {% if not authenticator_enabled %}<span class="choice-note">Not set up — add one from your profile</span>{% endif %}
         </button>
     </form>
 
