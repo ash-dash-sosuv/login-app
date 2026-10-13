@@ -936,24 +936,49 @@ class PasswordResetTests(unittest.TestCase):
         response = self.client.post("/forgot-password/verify", data={"method": "authenticator"})
         self.assertIn(b"isn&#39;t set up for your account", response.data)
 
-    def test_account_with_no_methods_can_verify_by_email(self):
+    def _escaped_meme(self, key):
+        return str(markupsafe.escape(memes.meme_url(key))).encode()
+
+    def test_unregistered_email_gets_an_error_and_meme(self):
+        response = self._start("nobody@example.com")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"no account with that email", response.data)
+        self.assertIn(self._escaped_meme("no_account"), response.data)
+        with self.client.session_transaction() as sess:
+            self.assertNotIn("reset_email", sess)
+        self.assertEqual(self.client.get("/forgot-password/verify").headers["Location"], "/forgot-password")
+
+    def test_account_with_no_methods_gets_an_error_and_meme(self):
+        # A new account: email isn't on until the user enables it.
+        response = self._start()
+
+        self.assertIn(b"no verification methods turned on", response.data)
+        self.assertIn(self._escaped_meme("no_reset_method"), response.data)
+        self.assertEqual(self.client.get("/forgot-password/verify").headers["Location"], "/forgot-password")
+
+    def test_only_the_accounts_enabled_methods_are_offered(self):
+        auth_module.set_sms_2fa(self.user_id, self.PHONE)
         self._start()
         page = self.client.get("/forgot-password/verify").data
-        self.assertIn(b'value="email" class="method-choice">', page)
+        self.assertIn(b'value="sms" class="method-choice">', page)
+        self.assertIn(b'value="email" class="method-choice" disabled', page)
+        self.assertIn(b'value="authenticator" class="method-choice" disabled', page)
 
-    def test_unknown_email_looks_the_same_but_never_verifies(self):
-        self.assertEqual(self._start("nobody@example.com").headers["Location"], "/forgot-password/verify")
-        page = self.client.get("/forgot-password/verify").data
-        self.assertIn(b'value="email" class="method-choice">', page)
+    def test_last_method_turned_off_mid_reset_sends_back_with_message(self):
+        auth_module.set_sms_2fa(self.user_id, self.PHONE)
+        self._start()
+        auth_module.set_sms_2fa(self.user_id, None)
 
-        with patch.object(auth_module, "send_otp_email") as send:
-            choose = self.client.post("/forgot-password/verify", data={"method": "email"})
-        send.assert_not_called()
-        self.assertEqual(choose.headers["Location"], "/forgot-password/code")
+        response = self.client.get("/forgot-password/verify")
 
-        verify = self.client.post("/forgot-password/code", data={"code": "123456"})
-        self.assertIn(b"Invalid or expired code", verify.data)
-        self.assertEqual(self._set_new_password().headers["Location"], "/forgot-password")
+        self.assertEqual(response.headers["Location"], "/forgot-password")
+        self.assertIn(b"no verification methods turned on", self.client.get("/forgot-password").data)
+
+    def test_new_accounts_start_with_email_verification_off(self):
+        user = auth_module.get_user_by_id(self.user_id)
+        self.assertEqual(user[5], 0)
+        self.assertFalse(auth_module.reset_methods(user)["email"])
 
     def test_cannot_skip_verification(self):
         auth_module.set_email_2fa(self.user_id, True)
@@ -979,6 +1004,7 @@ class PasswordResetTests(unittest.TestCase):
         self.client.post("/forgot-password/code", data={"code": pyotp.TOTP(self.secret).now()})
 
     def test_missing_method_choice_asks_to_choose(self):
+        auth_module.set_email_2fa(self.user_id, True)
         self._start()
         response = self.client.post("/forgot-password/verify", data={})
         self.assertIn(b"Please choose a verification method", response.data)

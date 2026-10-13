@@ -1531,10 +1531,9 @@ def logout():
 
 
 # --- Forgot password --------------------------------------------------------
-# Enter an email -> verify with one of the account's methods -> set a new
-# password -> sign in again. An email with no account gets the same screens
-# (email option only, nothing sent, no code accepted), so the form can't be
-# used to discover who has an account.
+# Enter an email -> verify with one of the methods that account has turned
+# on -> set a new password -> sign in again. Unregistered emails, and accounts
+# with no verification method on, are told so on the first page.
 
 RESET_SESSION_KEYS = ("reset_email", "reset_user_id", "reset_method", "reset_verified_user_id", "reset_verified_until")
 RESET_VERIFIED_SECONDS = 10 * 60  # time allowed to choose a new password after verifying
@@ -1551,12 +1550,18 @@ def _reset_user():
 
 
 def reset_methods(user):
-    """Methods that can verify a password reset: the account's enabled ones,
-    or email (proving the inbox is theirs) when none are on or no account."""
-    methods = login_methods(user) if user else dict.fromkeys(("email", "sms", "authenticator"), False)
-    if not any(methods.values()):
-        methods["email"] = True
-    return methods
+    """Methods that can verify a password reset: only the ones the account has
+    turned on. (Email counts only once the user has enabled it.)"""
+    if user is None:
+        return dict.fromkeys(("email", "sms", "authenticator"), False)
+    return login_methods(user)
+
+
+NO_ACCOUNT_ERROR = "There's no account with that email. Check it for typos, or create an account."
+NO_RESET_METHOD_ERROR = (
+    "This account has no verification methods turned on, so we can't confirm it's you "
+    "to reset the password."
+)
 
 
 def _reset_code_valid(user, method, code):
@@ -1574,8 +1579,6 @@ def _reset_code_valid(user, method, code):
 def _send_reset_code(user, method):
     """Send the code for email/SMS (authenticator codes come from the app).
     Raises EmailDeliveryError / SmsDeliveryError."""
-    if user is None:
-        return  # no account: send nothing, but behave the same
     if method == "email":
         start_email_otp(user[1])
     elif method == "sms":
@@ -1591,12 +1594,19 @@ def forgot_password():
             return render_template("forgot_password.html", error="Please enter a valid email address")
 
         user = get_user_by_email(email)
+        if not user:
+            logger.info("password_reset_rejected email=%s reason=no_account", _mask_email(email))
+            return render_template("forgot_password.html", error=NO_ACCOUNT_ERROR)
+        if not any(reset_methods(user).values()):
+            logger.info("password_reset_rejected user_id=%s reason=no_methods", user[0])
+            return render_template("forgot_password.html", error=NO_RESET_METHOD_ERROR)
+
         _clear_reset()
         clear_email_otp()
         clear_sms_otp()
         session["reset_email"] = email
-        session["reset_user_id"] = user[0] if user else None
-        logger.info("password_reset_started email=%s account_exists=%s", _mask_email(email), bool(user))
+        session["reset_user_id"] = user[0]
+        logger.info("password_reset_started user_id=%s", user[0])
         return redirect(url_for("forgot_password_choose"))
 
     return render_template("forgot_password.html")
@@ -1611,6 +1621,11 @@ def forgot_password_choose():
 
     user = _reset_user()
     methods = reset_methods(user)
+    if not any(methods.values()):
+        # Account deleted, or its last method turned off, since the reset began.
+        _clear_reset()
+        flash(NO_ACCOUNT_ERROR if user is None else NO_RESET_METHOD_ERROR, "error")
+        return redirect(url_for("forgot_password"))
     context = {
         "email": session["reset_email"],
         "email_enabled": methods["email"],
