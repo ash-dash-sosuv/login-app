@@ -38,6 +38,7 @@ MEMES = {
     "invalid_filename": ("spongebob", ["That file name", "tHaT fIlE nAmE"], "Mocking SpongeBob"),
     "file_not_found": ("pigeon", ["You", "That file", "Is this still here?"], "Anime guy asking: is this a pigeon?"),
     "reset_expired": ("philosoraptor", ["If my verification expired", "was I ever really verified?"], "Philosoraptor pondering"),
+    "forgot_password": ("afraid", ["I don't know my password", "and at this point I'm too afraid to ask"], "Andy from Parks and Rec, too afraid to ask"),
     "session_expired": ("whatyear", ["What year is it?", "Your session expired, sign in again"], "Robin Williams in Jumanji: what year is it?"),
     "generic_error": ("tried", ["At least", "you tried"], "At least you tried, with a gold star"),
     # --- successes ---

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import markupsafe
 import pyotp
 
 import app as auth_module
@@ -862,6 +863,14 @@ class PasswordResetTests(unittest.TestCase):
         client = auth_module.app.test_client()
         response = client.post("/login", data={"email": "forgot@example.com", "password": password})
         return response.status_code == 302
+
+    def test_forgot_password_page_has_its_own_meme(self):
+        meme = str(markupsafe.escape(memes.meme_url("forgot_password"))).encode()
+        self.assertIn(meme, self.client.get("/forgot-password").data)
+        # With an error showing, only the error's meme appears.
+        bad = self.client.post("/forgot-password", data={"email": "not-an-email"}).data
+        self.assertNotIn(meme, bad)
+        self.assertIn(str(markupsafe.escape(memes.meme_url("invalid_email"))).encode(), bad)
 
     def test_sign_in_page_links_to_forgot_password(self):
         self.assertIn(b'href="/forgot-password"', self.client.get("/login").data)
