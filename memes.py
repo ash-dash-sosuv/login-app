@@ -37,6 +37,7 @@ MEMES = {
     "upload_failed": ("fwp", ["Uploaded my files", "Server ran out of space"], "First world problems crying woman"),
     "invalid_filename": ("spongebob", ["That file name", "tHaT fIlE nAmE"], "Mocking SpongeBob"),
     "file_not_found": ("pigeon", ["You", "That file", "Is this still here?"], "Anime guy asking: is this a pigeon?"),
+    "reset_expired": ("philosoraptor", ["If my verification expired", "was I ever really verified?"], "Philosoraptor pondering"),
     "session_expired": ("whatyear", ["What year is it?", "Your session expired, sign in again"], "Robin Williams in Jumanji: what year is it?"),
     "generic_error": ("tried", ["At least", "you tried"], "At least you tried, with a gold star"),
     # --- successes ---
@@ -70,7 +71,9 @@ RULES = [
     ("error", ("out of space", "couldn't save", "upload failed"), "upload_failed"),
     ("error", ("invalid name",), "invalid_filename"),
     ("error", ("could not be found",), "file_not_found"),
+    ("error", ("couldn't find that account",), "not_found"),
     ("error", ("session has expired",), "session_expired"),
+    ("error", ("verification has expired",), "reset_expired"),
     ("success", ("password updated", "password changed"), "password_updated"),
     ("success", ("disabled",), "method_disabled"),
     ("success", ("enabled",), "method_enabled"),

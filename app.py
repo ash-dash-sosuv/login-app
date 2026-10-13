@@ -320,12 +320,14 @@ def update_two_factor_setup(user_id, secret):
 
 
 def update_password(user_id, new_password):
+    """Returns False if there's no such account (e.g. deleted meanwhile)."""
     with engine.begin() as conn:
-        conn.execute(
+        result = conn.execute(
             update(users)
             .where(users.c.id == user_id)
             .values(password=generate_password_hash(new_password))
         )
+    return result.rowcount > 0
 
 
 def disable_authenticator(user_id):
@@ -1558,7 +1560,9 @@ def reset_methods(user):
 
 
 def _reset_code_valid(user, method, code):
-    if user is None:
+    # The method must still be on: it may have been switched off (or the phone
+    # removed) in another session since this reset started.
+    if user is None or not reset_methods(user).get(method):
         return False
     if method == "email":
         return verify_email_otp(code)
@@ -1616,7 +1620,11 @@ def forgot_password_choose():
 
     if request.method == "POST":
         method = request.form.get("method")
-        if not methods.get(method):
+        if method not in methods:
+            return render_template(
+                "forgot_password_choose.html", **context, error="Please choose a verification method."
+            )
+        if not methods[method]:
             return render_template(
                 "forgot_password_choose.html",
                 **context,
@@ -1700,16 +1708,20 @@ def forgot_password_new():
             error = "New password must be at least 8 characters."
         elif new_password != confirm_password:
             error = "New password and confirmation do not match."
+        elif not update_password(user_id, new_password):
+            logger.error("password_reset_failed user_id=%s reason=user_not_found", user_id)
+            _clear_reset()
+            flash("We couldn't find that account anymore. Please start again.", "error")
+            return redirect(url_for("forgot_password"))
         else:
-            update_password(user_id, new_password)
             logger.info("password_reset_completed user_id=%s", user_id)
             # Start from a clean slate: any login in this browser ends too.
             session.clear()
             flash("Password changed. Sign in with your new password.", "success")
             return redirect(url_for("login"))
-        return render_template("forgot_password_new.html", email=session["reset_email"], error=error)
+        return render_template("forgot_password_new.html", email=session.get("reset_email", ""), error=error)
 
-    return render_template("forgot_password_new.html", email=session["reset_email"])
+    return render_template("forgot_password_new.html", email=session.get("reset_email", ""))
 
 
 # --- Error pages ---------------------------------------------------------------

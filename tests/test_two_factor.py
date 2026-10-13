@@ -715,6 +715,19 @@ class MemeTests(unittest.TestCase):
         for message, kind, key in cases:
             self.assertEqual(memes.meme_for(message, kind)["url"], memes.meme_url(key), message)
 
+    def test_every_message_in_the_app_has_its_own_meme(self):
+        """Scans app.py for messages shown to users, so a new message without
+        a matching meme rule fails here instead of falling back silently."""
+        import re
+
+        source = open(os.path.join(os.path.dirname(auth_module.__file__), "app.py")).read()
+        messages = {(m, "error") for m in re.findall(r'error\s*=\s*"([^"]+)"', source)}
+        messages |= set(re.findall(r'flash\(\s*f?"([^"]+)",\s*"(error|success)"', source))
+        self.assertGreater(len(messages), 25)
+        generic = {memes.meme_url("generic_error"), memes.meme_url("generic_success")}
+        for message, kind in messages:
+            self.assertNotIn(memes.meme_for(message, kind)["url"], generic, message)
+
     def test_captions_are_escaped_for_memegen(self):
         self.assertEqual(memes._escape_line("Why? 50% off_now - #1/2"), "Why~q_50~p_off__now_--_~h1~s2")
         self.assertEqual(memes._escape_line(""), "_")
@@ -941,6 +954,71 @@ class PasswordResetTests(unittest.TestCase):
 
         self.assertEqual(self._set_new_password().headers["Location"], "/forgot-password")
         self.assertTrue(self._can_log_in("oldpassword"))
+
+    def _verified_by_authenticator(self):
+        auth_module.update_two_factor_setup(self.user_id, self.secret)
+        self._start()
+        self.client.post("/forgot-password/verify", data={"method": "authenticator"})
+        self.client.post("/forgot-password/code", data={"code": pyotp.TOTP(self.secret).now()})
+
+    def test_missing_method_choice_asks_to_choose(self):
+        self._start()
+        response = self.client.post("/forgot-password/verify", data={})
+        self.assertIn(b"Please choose a verification method", response.data)
+
+    def test_method_switched_off_mid_reset_no_longer_verifies(self):
+        auth_module.update_two_factor_setup(self.user_id, self.secret)
+        auth_module.set_email_2fa(self.user_id, True)
+        self._start()
+        self.client.post("/forgot-password/verify", data={"method": "authenticator"})
+        auth_module.disable_authenticator(self.user_id)
+        old_secret_code = pyotp.TOTP(self.secret).now()
+
+        response = self.client.post("/forgot-password/code", data={"code": old_secret_code})
+
+        self.assertIn(b"Invalid code", response.data)
+
+    def test_account_deleted_mid_reset_is_reported(self):
+        self._verified_by_authenticator()
+        with auth_module.engine.begin() as conn:
+            conn.execute(auth_module.users.delete())
+
+        response = self._set_new_password()
+
+        self.assertEqual(response.headers["Location"], "/forgot-password")
+        page = self.client.get("/forgot-password").data
+        self.assertIn(b"couldn&#39;t find that account", page)
+        self.assertIn(memes.meme_url("not_found").replace("&", "&amp;").encode(), page)
+
+    def test_send_failures_show_a_message_and_meme(self):
+        import requests
+
+        auth_module.set_email_2fa(self.user_id, True)
+        auth_module.set_sms_2fa(self.user_id, self.PHONE)
+        self._start()
+        with patch.object(auth_module, "send_otp_email", side_effect=auth_module.EmailDeliveryError("down")):
+            email = self.client.post("/forgot-password/verify", data={"method": "email"})
+        service = unittest.mock.MagicMock()
+        service.verifications.create.side_effect = requests.ConnectionError("unreachable")
+        with patch.object(auth_module, "_twilio_verify_service", return_value=service):
+            sms = self.client.post("/forgot-password/verify", data={"method": "sms"})
+
+        self.assertIn(b"couldn&#39;t send an email", email.data)
+        self.assertIn(b"couldn&#39;t send a text", sms.data)
+        self.assertIn(memes.meme_url("send_failed").replace("&", "&amp;").encode(), sms.data)
+
+    def test_database_failure_during_reset_shows_503(self):
+        with patch.object(auth_module, "get_user_by_email", side_effect=auth_module.SQLAlchemyError("down")):
+            response = self._start()
+        self.assertEqual(response.status_code, 503)
+
+    def test_expired_verification_shows_its_meme(self):
+        self._verified_by_authenticator()
+        with self.client.session_transaction() as sess:
+            sess["reset_verified_until"] = 0
+        page = self.client.get("/forgot-password/new", follow_redirects=True).data
+        self.assertIn(b"verification has expired", page)
+        self.assertIn(memes.meme_url("reset_expired").replace("&", "&amp;").encode(), page)
 
     def test_new_password_is_validated(self):
         auth_module.update_two_factor_setup(self.user_id, self.secret)
