@@ -921,6 +921,28 @@ body.auth-body {
     color: var(--ink);
 }
 
+.auth-label-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 6px;
+}
+
+.auth-label-row .auth-label {
+    margin-bottom: 0;
+}
+
+.auth-label-row a {
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.auth-label-row a:hover {
+    text-decoration: underline;
+}
+
 .auth-input {
     width: 100%;
     box-sizing: border-box;

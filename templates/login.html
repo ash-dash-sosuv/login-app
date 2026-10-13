@@ -8,6 +8,9 @@
 <p class="auth-subtitle">Sign in to your vault.</p>
 
 {{ alert(error) }}
+{% for category, message in get_flashed_messages(with_categories=true) %}
+{{ alert(message, category) }}
+{% endfor %}
 
 <form method="POST" class="auth-form">
     <div class="auth-field">
@@ -16,7 +19,10 @@
                placeholder="you@example.com" autocomplete="email" required{% if not typed_email %} autofocus{% endif %}>
     </div>
     <div class="auth-field">
-        <label class="auth-label" for="password">Password</label>
+        <div class="auth-label-row">
+            <label class="auth-label" for="password">Password</label>
+            <a href="{{ url_for('forgot_password') }}">Forgot password?</a>
+        </div>
         <input class="auth-input" id="password" type="password" name="password"
                placeholder="Your password" autocomplete="current-password" required{% if typed_email %} autofocus{% endif %}>
     </div>

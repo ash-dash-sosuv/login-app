@@ -1,23 +1,10 @@
 {% extends "auth_base.html" %}
 {% block title %}{{ 'Set up verification' if enrolling else 'Verify it’s you' }}{% endblock %}
 
-{% macro choice(value, enabled, icon, title, description, not_set_up_note) %}
-<button type="submit" name="method" value="{{ value }}" class="method-choice"{% if not enabled %} disabled{% endif %}>
-    <span class="action-icon" aria-hidden="true">{{ icon }}</span>
-    <span class="method-choice-text">
-        <span class="method-choice-title">{{ title }}</span>
-        <span class="method-choice-desc">{{ description if enabled else not_set_up_note }}</span>
-    </span>
-    {% if enabled %}
-    <span class="method-choice-arrow" aria-hidden="true">&rsaquo;</span>
-    {% else %}
-    <span class="badge badge-muted">Not set up</span>
-    {% endif %}
-</button>
-{% endmacro %}
 
 {% block content %}
 {% from "_alerts.html" import alert %}
+{% from "_method_choice.html" import choice %}
 {% if enrolling %}
 <span class="auth-eyebrow">Last step</span>
 <h1 class="auth-title">Secure your account</h1>

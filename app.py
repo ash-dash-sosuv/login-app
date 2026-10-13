@@ -653,15 +653,18 @@ def rate_limit(bucket, limit, per_seconds, key=_client_ip, methods=("POST",)):
 
 
 def _account_id():
-    """The account a code is for: mid-login, or signed in (profile pages)."""
+    """The account a code is for: a password reset, mid-login, or signed in
+    (profile pages)."""
+    if request.endpoint and request.endpoint.startswith("forgot_password"):
+        return session.get("reset_user_id")
     return _pending_user_id() or session.get("user_id")
 
 
 def _sends_code():
     """True when this request makes the app email or text a code."""
-    if request.endpoint in ("two_factor_email_resend", "two_factor_sms_resend"):
+    if request.endpoint in ("two_factor_email_resend", "two_factor_sms_resend", "forgot_password_resend"):
         return True
-    if request.endpoint == "two_factor_choose":
+    if request.endpoint in ("two_factor_choose", "forgot_password_choose"):
         return request.form.get("method") in ("email", "sms")
     return request.form.get("step") == "send"  # SMS number entry
 
@@ -692,6 +695,7 @@ REGISTER_PER_IP = ("register_ip", 10, 60 * 60)
 CODE_SENDS_PER_ACCOUNT = ("code_send_account", 5, 15 * 60)
 CODE_SENDS_PER_IP = ("code_send_ip", 20, 15 * 60)
 CODE_CHECKS_PER_ACCOUNT = ("code_check_account", 10, 15 * 60)
+RESET_REQUESTS_PER_IP = ("reset_ip", 10, 15 * 60)
 
 
 def _wants_json():
@@ -1522,6 +1526,190 @@ def logout():
     logger.info("logout user_id=%s", session.get("user_id", "<anonymous>"))
     session.clear()
     return redirect(url_for("login"))
+
+
+# --- Forgot password --------------------------------------------------------
+# Enter an email -> verify with one of the account's methods -> set a new
+# password -> sign in again. An email with no account gets the same screens
+# (email option only, nothing sent, no code accepted), so the form can't be
+# used to discover who has an account.
+
+RESET_SESSION_KEYS = ("reset_email", "reset_user_id", "reset_method", "reset_verified_user_id", "reset_verified_until")
+RESET_VERIFIED_SECONDS = 10 * 60  # time allowed to choose a new password after verifying
+
+
+def _clear_reset():
+    for key in RESET_SESSION_KEYS:
+        session.pop(key, None)
+
+
+def _reset_user():
+    user_id = session.get("reset_user_id")
+    return get_user_by_id(user_id) if user_id else None
+
+
+def reset_methods(user):
+    """Methods that can verify a password reset: the account's enabled ones,
+    or email (proving the inbox is theirs) when none are on or no account."""
+    methods = login_methods(user) if user else dict.fromkeys(("email", "sms", "authenticator"), False)
+    if not any(methods.values()):
+        methods["email"] = True
+    return methods
+
+
+def _reset_code_valid(user, method, code):
+    if user is None:
+        return False
+    if method == "email":
+        return verify_email_otp(code)
+    if method == "sms":
+        return verify_sms_otp(user[6], code)
+    return pyotp.TOTP(ensure_totp_secret(user)).verify(code, valid_window=1)
+
+
+def _send_reset_code(user, method):
+    """Send the code for email/SMS (authenticator codes come from the app).
+    Raises EmailDeliveryError / SmsDeliveryError."""
+    if user is None:
+        return  # no account: send nothing, but behave the same
+    if method == "email":
+        start_email_otp(user[1])
+    elif method == "sms":
+        start_sms_otp(user[6])
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+@rate_limit(*RESET_REQUESTS_PER_IP)
+def forgot_password():
+    if request.method == "POST":
+        email = normalize_email(request.form.get("email", ""))
+        if not email:
+            return render_template("forgot_password.html", error="Please enter a valid email address")
+
+        user = get_user_by_email(email)
+        _clear_reset()
+        clear_email_otp()
+        clear_sms_otp()
+        session["reset_email"] = email
+        session["reset_user_id"] = user[0] if user else None
+        logger.info("password_reset_started email=%s account_exists=%s", _mask_email(email), bool(user))
+        return redirect(url_for("forgot_password_choose"))
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/forgot-password/verify", methods=["GET", "POST"])
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account)
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip)
+def forgot_password_choose():
+    if "reset_email" not in session:
+        return redirect(url_for("forgot_password"))
+
+    user = _reset_user()
+    methods = reset_methods(user)
+    context = {
+        "email": session["reset_email"],
+        "email_enabled": methods["email"],
+        "sms_enabled": methods["sms"],
+        "authenticator_enabled": methods["authenticator"],
+    }
+
+    if request.method == "POST":
+        method = request.form.get("method")
+        if not methods.get(method):
+            return render_template(
+                "forgot_password_choose.html",
+                **context,
+                error="That method isn't set up for your account. Please choose another.",
+            )
+        try:
+            _send_reset_code(user, method)
+        except EmailDeliveryError:
+            return render_template(
+                "forgot_password_choose.html", **context,
+                error="We couldn't send an email right now. Please try again shortly.",
+            )
+        except SmsDeliveryError:
+            return render_template(
+                "forgot_password_choose.html", **context,
+                error="We couldn't send a text message right now. Please try another method.",
+            )
+        session["reset_method"] = method
+        logger.info("password_reset_method_selected method=%s", method)
+        return redirect(url_for("forgot_password_code"))
+
+    return render_template("forgot_password_choose.html", **context)
+
+
+@app.route("/forgot-password/code", methods=["GET", "POST"])
+@rate_limit(*CODE_CHECKS_PER_ACCOUNT, key=_code_check_account)
+def forgot_password_code():
+    method = session.get("reset_method")
+    if "reset_email" not in session:
+        return redirect(url_for("forgot_password"))
+    if method not in ("email", "sms", "authenticator"):
+        return redirect(url_for("forgot_password_choose"))
+
+    user = _reset_user()
+    error = None
+    if request.method == "POST":
+        code = request.form.get("code", "").strip()
+        if _reset_code_valid(user, method, code):
+            clear_email_otp()
+            clear_sms_otp()
+            session["reset_verified_user_id"] = user[0]
+            session["reset_verified_until"] = time.time() + RESET_VERIFIED_SECONDS
+            logger.info("password_reset_verified user_id=%s method=%s", user[0], method)
+            return redirect(url_for("forgot_password_new"))
+        logger.warning("password_reset_code_rejected method=%s", method)
+        error = "Invalid code. Please try again." if method == "authenticator" else "Invalid or expired code. Please try again."
+
+    return render_template("forgot_password_code.html", email=session["reset_email"], method=method, error=error)
+
+
+@app.route("/forgot-password/resend")
+@rate_limit(*CODE_SENDS_PER_ACCOUNT, key=_code_send_account, methods=("GET",))
+@rate_limit(*CODE_SENDS_PER_IP, key=_code_send_ip, methods=("GET",))
+def forgot_password_resend():
+    method = session.get("reset_method")
+    if "reset_email" not in session or method not in ("email", "sms"):
+        return redirect(url_for("forgot_password"))
+    try:
+        _send_reset_code(_reset_user(), method)
+    except (EmailDeliveryError, SmsDeliveryError):
+        flash("We couldn't send a new code right now. Please try again shortly.", "error")
+    return redirect(url_for("forgot_password_code"))
+
+
+@app.route("/forgot-password/new", methods=["GET", "POST"])
+def forgot_password_new():
+    user_id = session.get("reset_verified_user_id")
+    if (
+        not user_id
+        or user_id != session.get("reset_user_id")
+        or time.time() > session.get("reset_verified_until", 0)
+    ):
+        _clear_reset()
+        flash("Your verification has expired. Please start again.", "error")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        if len(new_password) < 8:
+            error = "New password must be at least 8 characters."
+        elif new_password != confirm_password:
+            error = "New password and confirmation do not match."
+        else:
+            update_password(user_id, new_password)
+            logger.info("password_reset_completed user_id=%s", user_id)
+            # Start from a clean slate: any login in this browser ends too.
+            session.clear()
+            flash("Password changed. Sign in with your new password.", "success")
+            return redirect(url_for("login"))
+        return render_template("forgot_password_new.html", email=session["reset_email"], error=error)
+
+    return render_template("forgot_password_new.html", email=session["reset_email"])
 
 
 # --- Error pages ---------------------------------------------------------------

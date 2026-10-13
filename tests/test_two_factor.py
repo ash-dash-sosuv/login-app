@@ -815,6 +815,144 @@ class ProfileMfaStatusTests(unittest.TestCase):
         self.assertEqual(auth_module.mfa_status(None), ("MFA not set", "badge-mfa-none"))
 
 
+class PasswordResetTests(unittest.TestCase):
+    PHONE = "+14155552671"
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.temp_db.close()
+        auth_module.configure_database(f"sqlite:///{self.temp_db.name}")
+        auth_module.init_db()
+        auth_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.client = auth_module.app.test_client()
+        env = patch.dict(os.environ, {}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in SmsTwoFactorTests.TWILIO_ENV_KEYS:
+            os.environ.pop(key, None)
+        self.user_id, self.secret = auth_module.create_user("forgot@example.com", "oldpassword")
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db.name):
+            os.remove(self.temp_db.name)
+
+    def _start(self, email="forgot@example.com"):
+        return self.client.post("/forgot-password", data={"email": email})
+
+    def _set_new_password(self, password="newpassword1", confirm=None):
+        return self.client.post(
+            "/forgot-password/new",
+            data={"new_password": password, "confirm_password": confirm or password},
+        )
+
+    def _can_log_in(self, password):
+        client = auth_module.app.test_client()
+        response = client.post("/login", data={"email": "forgot@example.com", "password": password})
+        return response.status_code == 302
+
+    def test_sign_in_page_links_to_forgot_password(self):
+        self.assertIn(b'href="/forgot-password"', self.client.get("/login").data)
+
+    def test_full_reset_by_email_then_sign_in_again(self):
+        auth_module.set_email_2fa(self.user_id, True)
+        self.assertEqual(self._start().headers["Location"], "/forgot-password/verify")
+
+        page = self.client.get("/forgot-password/verify").data
+        self.assertIn(b'value="email" class="method-choice">', page)
+        self.assertIn(b'value="sms" class="method-choice" disabled', page)
+
+        with patch.object(auth_module, "send_otp_email") as send:
+            choose = self.client.post("/forgot-password/verify", data={"method": "email"})
+            code = send.call_args.args[1]
+        self.assertEqual(choose.headers["Location"], "/forgot-password/code")
+
+        verify = self.client.post("/forgot-password/code", data={"code": code})
+        self.assertEqual(verify.headers["Location"], "/forgot-password/new")
+
+        done = self._set_new_password()
+        self.assertEqual(done.headers["Location"], "/login")
+        login_page = self.client.get("/login").data
+        self.assertIn(b"Password changed", login_page)
+        with self.client.session_transaction() as sess:
+            self.assertNotIn("user_id", sess)
+            self.assertNotIn("reset_user_id", sess)
+
+        self.assertTrue(self._can_log_in("newpassword1"))
+        self.assertFalse(self._can_log_in("oldpassword"))
+
+    def test_reset_with_authenticator(self):
+        auth_module.update_two_factor_setup(self.user_id, self.secret)
+        self._start()
+        self.client.post("/forgot-password/verify", data={"method": "authenticator"})
+
+        verify = self.client.post("/forgot-password/code", data={"code": pyotp.TOTP(self.secret).now()})
+
+        self.assertEqual(verify.headers["Location"], "/forgot-password/new")
+
+    def test_reset_with_sms(self):
+        auth_module.set_sms_2fa(self.user_id, self.PHONE)
+        self._start()
+        with patch("builtins.print") as printed:
+            self.client.post("/forgot-password/verify", data={"method": "sms"})
+        code = printed.call_args.args[0].rsplit(" ", 1)[-1]
+
+        verify = self.client.post("/forgot-password/code", data={"code": code})
+
+        self.assertEqual(verify.headers["Location"], "/forgot-password/new")
+
+    def test_methods_not_enabled_are_rejected(self):
+        auth_module.set_email_2fa(self.user_id, True)
+        self._start()
+        response = self.client.post("/forgot-password/verify", data={"method": "authenticator"})
+        self.assertIn(b"isn&#39;t set up for your account", response.data)
+
+    def test_account_with_no_methods_can_verify_by_email(self):
+        self._start()
+        page = self.client.get("/forgot-password/verify").data
+        self.assertIn(b'value="email" class="method-choice">', page)
+
+    def test_unknown_email_looks_the_same_but_never_verifies(self):
+        self.assertEqual(self._start("nobody@example.com").headers["Location"], "/forgot-password/verify")
+        page = self.client.get("/forgot-password/verify").data
+        self.assertIn(b'value="email" class="method-choice">', page)
+
+        with patch.object(auth_module, "send_otp_email") as send:
+            choose = self.client.post("/forgot-password/verify", data={"method": "email"})
+        send.assert_not_called()
+        self.assertEqual(choose.headers["Location"], "/forgot-password/code")
+
+        verify = self.client.post("/forgot-password/code", data={"code": "123456"})
+        self.assertIn(b"Invalid or expired code", verify.data)
+        self.assertEqual(self._set_new_password().headers["Location"], "/forgot-password")
+
+    def test_cannot_skip_verification(self):
+        auth_module.set_email_2fa(self.user_id, True)
+        self._start()
+        self.assertEqual(self._set_new_password().headers["Location"], "/forgot-password")
+        self.assertTrue(self._can_log_in("oldpassword"))
+
+    def test_verification_expires(self):
+        auth_module.update_two_factor_setup(self.user_id, self.secret)
+        self._start()
+        self.client.post("/forgot-password/verify", data={"method": "authenticator"})
+        self.client.post("/forgot-password/code", data={"code": pyotp.TOTP(self.secret).now()})
+        with self.client.session_transaction() as sess:
+            sess["reset_verified_until"] = 0
+
+        self.assertEqual(self._set_new_password().headers["Location"], "/forgot-password")
+        self.assertTrue(self._can_log_in("oldpassword"))
+
+    def test_new_password_is_validated(self):
+        auth_module.update_two_factor_setup(self.user_id, self.secret)
+        self._start()
+        self.client.post("/forgot-password/verify", data={"method": "authenticator"})
+        self.client.post("/forgot-password/code", data={"code": pyotp.TOTP(self.secret).now()})
+
+        self.assertIn(b"at least 8 characters", self._set_new_password("short").data)
+        self.assertIn(b"do not match", self._set_new_password("longenough1", "different1").data)
+        self.assertTrue(self._can_log_in("oldpassword"))
+
+
 class PerUserFileTests(unittest.TestCase):
     def setUp(self):
         self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")

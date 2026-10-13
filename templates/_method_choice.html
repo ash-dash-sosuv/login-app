@@ -1,0 +1,16 @@
+{# One verification-method card on the choose pages (sign-in and password reset).
+   Disabled methods are greyed out with a "Not set up" badge. #}
+{% macro choice(value, enabled, icon, title, description, not_set_up_note) %}
+<button type="submit" name="method" value="{{ value }}" class="method-choice"{% if not enabled %} disabled{% endif %}>
+    <span class="action-icon" aria-hidden="true">{{ icon }}</span>
+    <span class="method-choice-text">
+        <span class="method-choice-title">{{ title }}</span>
+        <span class="method-choice-desc">{{ description if enabled else not_set_up_note }}</span>
+    </span>
+    {% if enabled %}
+    <span class="method-choice-arrow" aria-hidden="true">&rsaquo;</span>
+    {% else %}
+    <span class="badge badge-muted">Not set up</span>
+    {% endif %}
+</button>
+{% endmacro %}

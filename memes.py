@@ -71,7 +71,7 @@ RULES = [
     ("error", ("invalid name",), "invalid_filename"),
     ("error", ("could not be found",), "file_not_found"),
     ("error", ("session has expired",), "session_expired"),
-    ("success", ("password updated",), "password_updated"),
+    ("success", ("password updated", "password changed"), "password_updated"),
     ("success", ("disabled",), "method_disabled"),
     ("success", ("enabled",), "method_enabled"),
     ("success", ("uploaded",), "uploaded"),
