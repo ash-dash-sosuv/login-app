@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+    <h2>{{ title }}</h2>
+    <p class="helper-text">{{ message }}</p>
+
+    {% if session.get("user_id") %}
+    <a href="/dashboard">Go to your dashboard</a>
+    {% else %}
+    <a href="/login">Go to sign in</a>
+    {% endif %}
+</div>
+
+</body>
+</html>

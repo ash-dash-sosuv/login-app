@@ -56,18 +56,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _int_env(name, default):
+    """An integer setting from the environment; a missing or non-numeric value
+    falls back to the default (and is logged) instead of crashing."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.error("config_invalid variable=%s reason=not_an_integer default=%s", name, default)
+        return default
+
+
 app = Flask(__name__)
 # In production set SECRET_KEY to a long random value (e.g. `python -c "import secrets; print(secrets.token_hex(32))"`).
 # The fallback exists only so local development works out of the box.
 app.secret_key = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB per upload request
+MAX_UPLOAD_MB = 500
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024  # per upload request
 app.config["RATELIMIT_ENABLED"] = True
 
 # Behind a reverse proxy (Caddy in docker-compose) every request comes from the
 # proxy's address. TRUSTED_PROXIES=<number of proxies> makes request.remote_addr
 # the real client IP, which rate limiting relies on. Leave it unset when the app
 # is exposed directly, or clients could spoof X-Forwarded-For.
-_trusted_proxies = int(os.environ.get("TRUSTED_PROXIES", "0"))
+_trusted_proxies = _int_env("TRUSTED_PROXIES", 0)
 if _trusted_proxies:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=_trusted_proxies, x_proto=_trusted_proxies)
 
@@ -200,6 +215,29 @@ def _mask_phone(phone):
     return "*" * (len(phone) - 2) + phone[-2:]
 
 
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def normalize_email(raw):
+    """Lower-cased, trimmed email, or None if it isn't a plausible address.
+    Rejects whitespace (a newline would break the OTP email's headers) and
+    anything longer than the column holds."""
+    email = (raw or "").strip().lower()
+    if len(email) > 254 or not EMAIL_PATTERN.match(email):
+        return None
+    return email
+
+
+def password_matches(stored_hash, password):
+    """check_password_hash, but a malformed or unsupported stored hash (e.g.
+    from an old Werkzeug) counts as a mismatch instead of raising."""
+    try:
+        return check_password_hash(stored_hash or "", password)
+    except (ValueError, TypeError):
+        logger.error("password_hash_unreadable")
+        return False
+
+
 def create_user(email, password):
     logger.info("user_creation_started email=%s", _mask_email(email))
     hashed_password = generate_password_hash(password)
@@ -245,6 +283,21 @@ def get_user_by_email(email):
 
 def get_user_by_id(user_id):
     return _fetch_user(users.c.id == user_id)
+
+
+def ensure_totp_secret(user):
+    """The user's authenticator secret, creating and saving one for accounts
+    that predate it. It must be stored, not generated per request: the QR code
+    shown on one request is checked against the code entered on the next."""
+    if user[4]:
+        return user[4]
+    with engine.begin() as conn:
+        conn.execute(
+            update(users)
+            .where(users.c.id == user[0], users.c.two_factor_secret.is_(None))
+            .values(two_factor_secret=pyotp.random_base32())
+        )
+        return conn.execute(select(users.c.two_factor_secret).where(users.c.id == user[0])).scalar_one()
 
 
 def update_two_factor_setup(user_id, secret):
@@ -341,29 +394,30 @@ def send_otp_email(to_email, code):
         print(f"[DEV] Email OTP for {to_email}: {code}")
         return
 
-    port = int(os.environ.get("SMTP_PORT", "587"))
+    port = _int_env("SMTP_PORT", 587)
     username = os.environ.get("SMTP_USER")
     password = os.environ.get("SMTP_PASSWORD")
     sender = os.environ.get("SMTP_FROM", username or "no-reply@login-app.local")
 
-    message = EmailMessage()
-    message["Subject"] = "Your login verification code"
-    message["From"] = sender
-    message["To"] = to_email
-    message.set_content(
-        f"Your verification code is {code}.\n\n"
-        f"It expires in {EMAIL_OTP_TTL_SECONDS // 60} minutes. "
-        "If you didn't try to sign in, you can ignore this email."
-    )
-
     try:
+        message = EmailMessage()
+        message["Subject"] = "Your login verification code"
+        message["From"] = sender
+        message["To"] = to_email
+        message.set_content(
+            f"Your verification code is {code}.\n\n"
+            f"It expires in {EMAIL_OTP_TTL_SECONDS // 60} minutes. "
+            "If you didn't try to sign in, you can ignore this email."
+        )
         # A timeout so a slow mail server can't tie up a request thread.
         with smtplib.SMTP(host, port, timeout=NETWORK_TIMEOUT_SECONDS) as smtp:
             smtp.starttls()
             if username and password:
                 smtp.login(username, password)
             smtp.send_message(message)
-    except (smtplib.SMTPException, OSError) as exc:
+    # ValueError covers header values the email library refuses (e.g. a
+    # newline in an address) and non-ASCII SMTP credentials.
+    except (smtplib.SMTPException, OSError, ValueError) as exc:
         logger.error("otp_email_failed email=%s host=%s error=%s", _mask_email(to_email), host, type(exc).__name__)
         raise EmailDeliveryError(str(exc)) from exc
     logger.info("otp_email_sent email=%s host=%s", _mask_email(to_email), host)
@@ -467,13 +521,18 @@ def start_sms_otp(phone):
         print(f"[DEV] SMS OTP for {phone}: {code}")
         return
 
-    from twilio.base.exceptions import TwilioRestException
+    from requests import RequestException
+    from twilio.base.exceptions import TwilioException, TwilioRestException
 
     try:
         service.verifications.create(to=phone, channel="sms")
     except TwilioRestException as exc:
         logger.error("sms_otp_send_failed phone=%s status=%s code=%s", _mask_phone(phone), exc.status, exc.code)
         raise SmsDeliveryError(str(exc.msg)) from exc
+    except (TwilioException, RequestException) as exc:
+        # Timeouts and connection errors from the HTTP client.
+        logger.error("sms_otp_send_failed phone=%s error=%s", _mask_phone(phone), type(exc).__name__)
+        raise SmsDeliveryError(str(exc)) from exc
     logger.info("sms_otp_started phone=%s", _mask_phone(phone))
 
 
@@ -496,7 +555,8 @@ def verify_sms_otp(phone, code):
         logger.info("sms_otp_verification_completed success=%s", verified)
         return verified
 
-    from twilio.base.exceptions import TwilioRestException
+    from requests import RequestException
+    from twilio.base.exceptions import TwilioException, TwilioRestException
 
     try:
         check = service.verification_checks.create(to=phone, code=code)
@@ -504,6 +564,9 @@ def verify_sms_otp(phone, code):
         # Twilio answers 404 once a verification has expired, been approved,
         # or exceeded its attempt limit.
         logger.warning("sms_otp_verification_failed status=%s code=%s", exc.status, exc.code)
+        return False
+    except (TwilioException, RequestException) as exc:
+        logger.error("sms_otp_verification_failed error=%s", type(exc).__name__)
         return False
 
     verified = check.status == "approved"
@@ -623,10 +686,18 @@ CODE_SENDS_PER_IP = ("code_send_ip", 20, 15 * 60)
 CODE_CHECKS_PER_ACCOUNT = ("code_check_account", 10, 15 * 60)
 
 
+def _wants_json():
+    """Requests from the upload page's script, which expects JSON back."""
+    return request.headers.get("X-Requested-With") == "XMLHttpRequest"
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if "user_id" not in session:
+        # Views read both keys; a session missing either isn't a usable login.
+        if "user_id" not in session or "email" not in session:
+            if _wants_json():
+                return jsonify(error="Your session has expired. Please sign in again."), 401
             return redirect(url_for("login"))
         return view(*args, **kwargs)
 
@@ -658,9 +729,12 @@ def list_uploaded_files(directory):
     entries = []
     for name in os.listdir(directory):
         path = os.path.join(directory, name)
-        if not os.path.isfile(path):
-            continue
-        stat = os.stat(path)
+        try:
+            if not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+        except OSError:
+            continue  # deleted or unreadable between listdir and stat
         entries.append(
             {
                 "name": name,
@@ -712,12 +786,17 @@ def home():
 @rate_limit(*REGISTER_PER_IP)
 def register():
     if request.method == "POST":
-        email = request.form.get("email", "").strip().lower()
+        raw_email = request.form.get("email", "")
         password = request.form.get("password", "")
 
-        if not email or not password:
+        if not raw_email.strip() or not password:
             logger.warning("registration_rejected reason=missing_credentials")
             return render_template("register.html", error="Please enter an email and password")
+
+        email = normalize_email(raw_email)
+        if not email:
+            logger.warning("registration_rejected reason=invalid_email")
+            return render_template("register.html", error="Please enter a valid email address")
 
         try:
             user_id, secret = create_user(email, password)
@@ -743,7 +822,7 @@ def login():
 
         user = get_user_by_email(email)
 
-        if user and check_password_hash(user[2], password):
+        if user and password_matches(user[2], password):
             session["pending_2fa_user_id"] = user[0]
             session["pending_2fa_email"] = user[1]
             session["pending_2fa_secret"] = user[4] or pyotp.random_base32()
@@ -823,7 +902,7 @@ def two_factor_choose():
         if method == "email":
             logger.info("two_factor_method_selected method=email enrolling=%s user_id=%s", enrolling, user[0])
             try:
-                start_email_otp(session["pending_2fa_email"])
+                start_email_otp(user[1])
             except EmailDeliveryError:
                 return render_template(
                     "two_factor_choose.html",
@@ -875,7 +954,7 @@ def two_factor_setup():
         logger.warning("two_factor_setup_rejected user_id=%s reason=enrollment_during_login", user[0])
         return redirect(url_for("two_factor_choose"))
 
-    secret = user[4]
+    secret = ensure_totp_secret(user)
     email = user[1]
 
     def render(error=None):
@@ -991,7 +1070,7 @@ def two_factor_email_resend():
         return redirect(url_for("two_factor_choose"))
 
     try:
-        start_email_otp(session["pending_2fa_email"])
+        start_email_otp(user[1])
     except EmailDeliveryError:
         flash("We couldn't send a new code right now. Please try again shortly.", "error")
         return redirect(url_for("two_factor_email"))
@@ -1131,7 +1210,7 @@ def files_upload():
     user_dir = user_upload_dir(session["user_id"])
     if request.method == "POST":
         uploaded = [f for f in request.files.getlist("files") if f and f.filename]
-        saved, skipped = [], []
+        saved, skipped, failed = [], [], []
 
         for file in uploaded:
             filename = secure_filename(file.filename)
@@ -1139,17 +1218,40 @@ def files_upload():
                 skipped.append(file.filename)
                 continue
             filename = unique_filename(user_dir, filename)
-            file.save(os.path.join(user_dir, filename))
+            path = os.path.join(user_dir, filename)
+            try:
+                file.save(path)
+            except OSError as exc:
+                # Usually a full disk. Don't leave a truncated file behind.
+                logger.error("upload_save_failed user_id=%s error=%s", session["user_id"], exc)
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                failed.append(file.filename)
+                continue
             saved.append(filename)
 
-        is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        if is_ajax:
-            return jsonify(saved=saved, skipped=skipped, files=list_uploaded_files(user_dir))
+        failed_message = (
+            f"Couldn't save {len(failed)} file(s). The server may be out of space; please try again later."
+            if failed
+            else None
+        )
+        if _wants_json():
+            return jsonify(
+                saved=saved,
+                skipped=skipped,
+                failed=failed,
+                error=failed_message,
+                files=list_uploaded_files(user_dir),
+            )
 
         if saved:
             flash(f"Uploaded {len(saved)} file(s) successfully.", "success")
         if skipped:
             flash(f"Skipped {len(skipped)} file(s) with an invalid name.", "error")
+        if failed_message:
+            flash(failed_message, "error")
         return redirect(url_for("files_upload"))
 
     return render_template("files_upload.html", email=session["email"], files=list_uploaded_files(user_dir))
@@ -1215,7 +1317,7 @@ def change_password():
     new_password = request.form.get("new_password", "")
     confirm_password = request.form.get("confirm_password", "")
 
-    if not user or not check_password_hash(user[2], current_password):
+    if not user or not password_matches(user[2], current_password):
         flash("Current password is incorrect.", "error")
     elif len(new_password) < 8:
         flash("New password must be at least 8 characters.", "error")
@@ -1238,7 +1340,7 @@ def profile_authenticator_setup():
     if user[3] == 1:
         return redirect(url_for("profile"))
 
-    secret = user[4] or pyotp.random_base32()
+    secret = ensure_totp_secret(user)
     email = user[1]
 
     if request.method == "POST":
@@ -1381,6 +1483,59 @@ def logout():
     logger.info("logout user_id=%s", session.get("user_id", "<anonymous>"))
     session.clear()
     return redirect(url_for("login"))
+
+
+# --- Error pages ---------------------------------------------------------------
+# Every error gets a friendly page (or JSON for the upload script) instead of
+# the server's bare default. These handlers must not touch the database, since
+# a database failure is one of the things they report.
+
+ERROR_MESSAGES = {
+    400: ("Bad request", "That request couldn't be processed. Please go back and try again."),
+    403: ("Not allowed", "You don't have access to that."),
+    404: ("Page not found", "The page you're looking for doesn't exist or has moved."),
+    405: ("Not allowed", "That action isn't available here."),
+    413: ("Upload too large", f"Uploads are limited to {MAX_UPLOAD_MB} MB at a time. Try fewer or smaller files."),
+    500: ("Something went wrong", "An unexpected error happened on our side. Please try again."),
+    503: ("Temporarily unavailable", "We're having trouble reaching our database. Please try again in a moment."),
+}
+
+
+def error_response(status, name=None):
+    title, message = ERROR_MESSAGES.get(
+        status, (name or "Something went wrong", "That request couldn't be completed. Please try again.")
+    )
+    if _wants_json():
+        return jsonify(error=message), status
+    return render_template("error.html", title=title, message=message, status=status), status
+
+
+@app.errorhandler(HTTPException)
+def handle_http_error(exc):
+    status = exc.code or 500
+    if status >= 500:
+        logger.error("http_error status=%s path=%s", status, request.path)
+    else:
+        logger.info("http_error status=%s path=%s", status, request.path)
+    # A too-large upload from the plain form: back to the upload page with a note.
+    if status == 413 and request.endpoint == "files_upload" and not _wants_json():
+        flash(ERROR_MESSAGES[413][1], "error")
+        return redirect(url_for("files_upload"))
+    return error_response(status, exc.name)
+
+
+@app.errorhandler(SQLAlchemyError)
+def handle_database_error(exc):
+    # Database down, locked for too long, disk full, ...
+    logger.exception("database_error path=%s", request.path)
+    return error_response(503)
+
+
+@app.errorhandler(500)
+def handle_unexpected_error(exc):
+    # Any other uncaught exception. Flask has already logged the traceback; in
+    # debug mode and tests the exception propagates instead, so it stays visible.
+    return error_response(500)
 
 
 if __name__ == "__main__":

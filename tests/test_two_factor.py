@@ -495,6 +495,185 @@ class RateLimitAndDeliveryTests(unittest.TestCase):
             self.assertFalse(auth_module.hit_rate_limit("test", "x", 0, 60))
 
 
+class ErrorHandlingTests(unittest.TestCase):
+    XHR = {"X-Requested-With": "XMLHttpRequest"}
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.temp_db.close()
+        auth_module.configure_database(f"sqlite:///{self.temp_db.name}")
+        auth_module.init_db()
+        auth_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.client = auth_module.app.test_client()
+        upload_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(upload_dir.cleanup)
+        upload_patch = patch.object(auth_module, "UPLOAD_DIR", upload_dir.name)
+        upload_patch.start()
+        self.addCleanup(upload_patch.stop)
+        self.user_id, _ = auth_module.create_user("errors@example.com", "password123")
+        auth_module.set_email_2fa(self.user_id, True)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db.name):
+            os.remove(self.temp_db.name)
+
+    def _sign_in(self):
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.user_id
+            sess["email"] = "errors@example.com"
+
+    def _upload(self, headers=None, name="a.txt"):
+        return self.client.post(
+            "/files/upload",
+            data={"files": (io.BytesIO(b"hello world"), name)},
+            content_type="multipart/form-data",
+            headers=headers or {},
+        )
+
+    # --- app-wide handlers ---
+
+    def test_unknown_page_shows_friendly_404(self):
+        response = self.client.get("/no-such-page")
+        self.assertEqual(response.status_code, 404)
+        self.assertIn(b"Page not found", response.data)
+
+    def test_wrong_method_shows_friendly_405(self):
+        self._sign_in()
+        response = self.client.get("/profile/change-password")
+        self.assertEqual(response.status_code, 405)
+        self.assertIn(b"isn&#39;t available here", response.data)
+
+    def test_database_failure_shows_503_page(self):
+        failure = auth_module.SQLAlchemyError("database is locked")
+        with patch.object(auth_module, "get_user_by_email", side_effect=failure):
+            response = self.client.post("/login", data={"email": "errors@example.com", "password": "x"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"trouble reaching our database", response.data)
+
+    def test_unexpected_exception_shows_friendly_500_page(self):
+        self._sign_in()
+        with patch.dict(auth_module.app.config, {"PROPAGATE_EXCEPTIONS": False}), patch.object(
+            auth_module, "list_uploaded_files", side_effect=RuntimeError("boom")
+        ):
+            response = self.client.get("/dashboard")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn(b"Something went wrong", response.data)
+        self.assertNotIn(b"boom", response.data)
+
+    # --- uploads ---
+
+    def test_too_large_upload_returns_json_for_the_upload_script(self):
+        self._sign_in()
+        with patch.dict(auth_module.app.config, {"MAX_CONTENT_LENGTH": 10}):
+            response = self._upload(headers=self.XHR)
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("limited to", response.get_json()["error"])
+
+    def test_too_large_upload_from_plain_form_redirects_with_message(self):
+        self._sign_in()
+        with patch.dict(auth_module.app.config, {"MAX_CONTENT_LENGTH": 10}):
+            response = self._upload()
+
+        self.assertEqual(response.headers["Location"], "/files/upload")
+        with self.client.session_transaction() as sess:
+            self.assertIn("limited to", sess["_flashes"][0][1])
+
+    def test_disk_full_during_upload_is_reported_and_leaves_no_partial_file(self):
+        self._sign_in()
+        disk_full = OSError(28, "No space left on device")
+        with patch("werkzeug.datastructures.FileStorage.save", side_effect=disk_full):
+            response = self._upload(headers=self.XHR)
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["failed"], ["a.txt"])
+        self.assertIn("out of space", data["error"])
+        self.assertEqual(os.listdir(auth_module.user_upload_dir(self.user_id)), [])
+
+    def test_upload_script_gets_401_when_session_has_expired(self):
+        response = self._upload(headers=self.XHR)
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("session has expired", response.get_json()["error"])
+
+    def test_file_vanishing_while_listing_is_skipped(self):
+        with patch.object(auth_module.os.path, "isfile", return_value=True), patch.object(
+            auth_module.os, "stat", side_effect=FileNotFoundError()
+        ), patch.object(auth_module.os, "listdir", return_value=["gone.txt"]):
+            self.assertEqual(auth_module.list_uploaded_files("/anywhere"), [])
+
+    # --- sessions and accounts ---
+
+    def test_partial_session_is_sent_to_login_instead_of_crashing(self):
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = self.user_id  # no "email" key
+        response = self.client.get("/dashboard")
+        self.assertEqual(response.headers["Location"], "/login")
+
+    def test_unreadable_password_hash_is_a_failed_login(self):
+        with auth_module.engine.begin() as conn:
+            conn.execute(auth_module.update(auth_module.users).values(password="sha256$abc$def"))
+
+        response = self.client.post("/login", data={"email": "errors@example.com", "password": "x"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Invalid email or password", response.data)
+
+    def test_invalid_email_is_rejected_at_registration(self):
+        for email in ("not-an-email", "a@b.com\nBcc: c@d.com", "x" * 250 + "@example.com"):
+            response = self.client.post("/register", data={"email": email, "password": "password123"})
+            self.assertIn(b"valid email address", response.data)
+        self.assertIsNone(auth_module.get_user_by_email("not-an-email"))
+
+    def test_account_without_secret_can_set_up_authenticator_from_profile(self):
+        with auth_module.engine.begin() as conn:
+            conn.execute(auth_module.update(auth_module.users).values(two_factor_secret=None))
+        self._sign_in()
+
+        self.client.get("/profile/2fa/authenticator/setup")
+        secret = auth_module.get_user_by_id(self.user_id)[4]
+        self.assertTrue(secret)  # saved, so the next request uses the same one
+        response = self.client.post(
+            "/profile/2fa/authenticator/setup", data={"code": pyotp.TOTP(secret).now()}
+        )
+
+        self.assertEqual(response.headers["Location"], "/profile")
+        self.assertEqual(auth_module.get_user_by_id(self.user_id)[3], 1)
+
+    # --- outside services ---
+
+    def test_twilio_network_errors_show_a_message(self):
+        import requests
+
+        auth_module.set_sms_2fa(self.user_id, "+14155552671")
+        self.client.post("/login", data={"email": "errors@example.com", "password": "password123"})
+        service = unittest.mock.MagicMock()
+        service.verifications.create.side_effect = requests.ConnectionError("unreachable")
+        service.verification_checks.create.side_effect = requests.Timeout("slow")
+
+        with patch.object(auth_module, "_twilio_verify_service", return_value=service):
+            choose = self.client.post("/two-factor/choose", data={"method": "sms"})
+            with auth_module.app.test_request_context():
+                self.assertFalse(auth_module.verify_sms_otp("+14155552671", "123456"))
+
+        self.assertEqual(choose.status_code, 200)
+        self.assertIn(b"couldn&#39;t send a text", choose.data)
+
+    def test_bad_smtp_port_setting_falls_back_to_587(self):
+        env = {"SMTP_HOST": "smtp.example.com", "SMTP_PORT": "not-a-number"}
+        with patch.dict(os.environ, env), patch.object(auth_module.smtplib, "SMTP") as smtp:
+            auth_module.send_otp_email("someone@example.com", "123456")
+
+        self.assertEqual(smtp.call_args.args, ("smtp.example.com", 587))
+
+    def test_newline_in_address_becomes_delivery_error(self):
+        with patch.dict(os.environ, {"SMTP_HOST": "smtp.example.com"}), patch.object(auth_module.smtplib, "SMTP"):
+            with self.assertRaises(auth_module.EmailDeliveryError):
+                auth_module.send_otp_email("a@b.com\nBcc: c@d.com", "123456")
+
+
 class PerUserFileTests(unittest.TestCase):
     def setUp(self):
         self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
