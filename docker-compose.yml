@@ -24,7 +24,8 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      DOMAIN: ${DOMAIN:?DOMAIN must be set - run ./deploy.sh}
+      # deploy.sh writes DOMAIN into .env, which Compose loads automatically.
+      DOMAIN: ${DOMAIN:?DOMAIN must be set - run ./deploy.sh or add DOMAIN=... to .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

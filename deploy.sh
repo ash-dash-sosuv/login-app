@@ -77,6 +77,12 @@ if ! grep -qE '^SECRET_KEY=.{32,}' .env || grep -q '^SECRET_KEY=change-me' .env;
 fi
 mkdir -p data uploads
 
+# Reuse a custom domain saved in .env; sslip.io names are recomputed because
+# the public IP changes when the instance is stopped and started.
+SAVED_DOMAIN=$(sed -n 's/^DOMAIN=//p' .env | tail -1)
+if [ -z "${DOMAIN:-}" ] && [ -n "$SAVED_DOMAIN" ] && [[ "$SAVED_DOMAIN" != *.sslip.io ]]; then
+  DOMAIN=$SAVED_DOMAIN
+fi
 if [ -z "${DOMAIN:-}" ]; then
   # EC2 metadata (IMDSv2) first, then a public lookup for other hosts.
   TOKEN=$(curl -fsS -m 2 -X PUT http://169.254.169.254/latest/api/token \
@@ -86,6 +92,10 @@ if [ -z "${DOMAIN:-}" ]; then
   [ -n "$PUBLIC_IP" ] || PUBLIC_IP=$(curl -fsS -m 5 https://checkip.amazonaws.com | tr -d '[:space:]')
   DOMAIN="${PUBLIC_IP//./-}.sslip.io"
 fi
+# Save it to .env, which Compose reads automatically, so manual commands like
+# `sudo docker compose logs` work without DOMAIN in the shell.
+sed -i '/^DOMAIN=/d' .env
+echo "DOMAIN=$DOMAIN" >> .env
 export DOMAIN
 
 # --- Deploy -----------------------------------------------------------------
