@@ -755,6 +755,66 @@ class MemeTests(unittest.TestCase):
         self.assertNotIn(b"memegen", response.data)
 
 
+class ProfileMfaStatusTests(unittest.TestCase):
+    PHONE = "+14155552671"
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        self.temp_db.close()
+        auth_module.configure_database(f"sqlite:///{self.temp_db.name}")
+        auth_module.init_db()
+        auth_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        self.client = auth_module.app.test_client()
+        upload_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(upload_dir.cleanup)
+        upload_patch = patch.object(auth_module, "UPLOAD_DIR", upload_dir.name)
+        upload_patch.start()
+        self.addCleanup(upload_patch.stop)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_db.name):
+            os.remove(self.temp_db.name)
+
+    def _user_with(self, email=False, sms=False, authenticator=False):
+        user_id, secret = auth_module.create_user(f"u{email}{sms}{authenticator}@example.com", "password123")
+        if email:
+            auth_module.set_email_2fa(user_id, True)
+        if sms:
+            auth_module.set_sms_2fa(user_id, self.PHONE)
+        if authenticator:
+            auth_module.update_two_factor_setup(user_id, secret)
+        return user_id
+
+    def _profile_badge(self, user_id):
+        with self.client.session_transaction() as sess:
+            sess["user_id"] = user_id
+            sess["email"] = "someone@example.com"
+        return self.client.get("/profile").data
+
+    def test_status_for_every_combination(self):
+        cases = [
+            ({"email": True, "sms": True, "authenticator": True}, "MFA fully setup", "badge-mfa-full"),
+            ({"email": True, "sms": True}, "MFA not set for authenticator app", "badge-mfa-partial"),
+            ({"email": True, "authenticator": True}, "MFA not set for mobile number", "badge-mfa-partial"),
+            ({"sms": True, "authenticator": True}, "MFA not set for email", "badge-mfa-partial"),
+            ({"email": True}, "MFA set for only email", "badge-mfa-single"),
+            ({"sms": True}, "MFA set for only mobile number", "badge-mfa-single"),
+            ({"authenticator": True}, "MFA set for only authenticator app", "badge-mfa-single"),
+            ({}, "MFA not set", "badge-mfa-none"),
+        ]
+        for methods, label, badge in cases:
+            user = auth_module.get_user_by_id(self._user_with(**methods))
+            self.assertEqual(auth_module.mfa_status(user), (label, badge), methods)
+
+    def test_profile_header_shows_the_status(self):
+        user_id = self._user_with(email=True)
+        page = self._profile_badge(user_id)
+        self.assertIn(b'<span class="badge badge-mfa-single">MFA set for only email</span>', page)
+
+    def test_missing_user_counts_as_not_set(self):
+        self.assertEqual(auth_module.mfa_status(None), ("MFA not set", "badge-mfa-none"))
+
+
 class PerUserFileTests(unittest.TestCase):
     def setUp(self):
         self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")

@@ -11,9 +11,7 @@
     <div class="profile-details">
         <div class="profile-email">{{ email }}</div>
         <div class="profile-badges">
-            <span class="badge {{ 'badge-success' if two_factor_enabled else 'badge-warning' }}">
-                {{ 'Two-Factor Enabled' if two_factor_enabled else 'Two-Factor Not Set Up' }}
-            </span>
+            <span class="badge {{ mfa_badge }}">{{ mfa_label }}</span>
         </div>
     </div>
 </div>

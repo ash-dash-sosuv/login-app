@@ -580,6 +580,28 @@ body.app-body {
     color: var(--warning);
 }
 
+/* Profile header MFA status: all methods on, all but one, only one, none.
+   Solid fills with text colours chosen for readable contrast. */
+.badge-mfa-full {
+    background: #15803d;
+    color: #fff;
+}
+
+.badge-mfa-partial {
+    background: #fde047;
+    color: #713f12;
+}
+
+.badge-mfa-single {
+    background: #f59e0b;
+    color: #451a03;
+}
+
+.badge-mfa-none {
+    background: #dc2626;
+    color: #fff;
+}
+
 /* --- Two-factor method list --- */
 
 .panel-note {

@@ -863,6 +863,24 @@ def needs_enrollment(user):
     return not any(login_methods(user).values())
 
 
+MFA_METHOD_NAMES = {"email": "email", "sms": "mobile number", "authenticator": "authenticator app"}
+
+
+def mfa_status(user):
+    """(label, badge class) summarising which verification methods are on:
+    all three, all but one, only one, or none."""
+    enabled = login_methods(user) if user else dict.fromkeys(MFA_METHOD_NAMES, False)
+    on = [MFA_METHOD_NAMES[method] for method, is_on in enabled.items() if is_on]
+    off = [MFA_METHOD_NAMES[method] for method, is_on in enabled.items() if not is_on]
+    if not off:
+        return "MFA fully setup", "badge-mfa-full"
+    if len(on) == 2:
+        return f"MFA not set for {off[0]}", "badge-mfa-partial"
+    if len(on) == 1:
+        return f"MFA set for only {on[0]}", "badge-mfa-single"
+    return "MFA not set", "badge-mfa-none"
+
+
 def _complete_login(user):
     session["user_id"] = user[0]
     session["email"] = user[1]
@@ -1315,9 +1333,12 @@ def contact():
 def profile():
     user = get_user_by_id(session["user_id"])
     files = list_uploaded_files(user_upload_dir(session["user_id"]))
+    mfa_label, mfa_badge = mfa_status(user)
     return render_template(
         "profile.html",
         email=session["email"],
+        mfa_label=mfa_label,
+        mfa_badge=mfa_badge,
         two_factor_enabled=bool(user[3]) if user else False,
         email_2fa_enabled=bool(user[5]) if user else False,
         sms_2fa_enabled=bool(user and user[7] and user[6]),
