@@ -864,6 +864,14 @@ class PasswordResetTests(unittest.TestCase):
         response = client.post("/login", data={"email": "forgot@example.com", "password": password})
         return response.status_code == 302
 
+    def test_create_account_page_has_its_own_meme(self):
+        meme = str(markupsafe.escape(memes.meme_url("create_account"))).encode()
+        self.assertIn(meme, self.client.get("/register").data)
+        # With an error showing, only the error's meme appears.
+        bad = self.client.post("/register", data={"email": "not-an-email", "password": "x"}).data
+        self.assertNotIn(meme, bad)
+        self.assertIn(str(markupsafe.escape(memes.meme_url("invalid_email"))).encode(), bad)
+
     def test_forgot_password_page_has_its_own_meme(self):
         meme = str(markupsafe.escape(memes.meme_url("forgot_password"))).encode()
         self.assertIn(meme, self.client.get("/forgot-password").data)

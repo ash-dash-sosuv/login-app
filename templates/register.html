@@ -3,10 +3,15 @@
 
 {% block content %}
 {% from "_alerts.html" import alert %}
+{% from "_meme.html" import meme %}
 <h1 class="auth-title">Create your account</h1>
 <p class="auth-subtitle">Keep your files in a vault only you can open. You'll choose how to verify sign-ins next.</p>
 
 {{ alert(error) }}
+{# The page's own meme, unless an error is already showing one. #}
+{% if not error %}
+{{ meme(meme_by_key("create_account")) }}
+{% endif %}
 
 <form method="POST" class="auth-form">
     <div class="auth-field">
