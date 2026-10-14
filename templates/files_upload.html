@@ -11,7 +11,7 @@
     <div id="dropzone" class="dropzone">
         <div class="dropzone-icon">&#8593;</div>
         <div class="dropzone-title">Drag &amp; drop files here</div>
-        <div class="dropzone-sub">or click to browse from your computer</div>
+        <div class="dropzone-sub">or click to browse from your computer &middot; up to {{ max_file_mb }} MB per file</div>
         <input type="file" name="files" id="file-input" multiple hidden>
     </div>
 
@@ -23,7 +23,9 @@
     {# Filled in by the script with the meme the server sends back. The
        fallback is for when the connection drops and there's no reply. #}
     <figure id="upload-meme" class="meme" hidden
-            data-fallback='{{ meme_by_key("upload_failed")|tojson }}'>
+            data-fallback='{{ meme_by_key("upload_failed")|tojson }}'
+            data-too-large='{{ meme_by_key("too_large")|tojson }}'
+            data-max-file-mb="{{ max_file_mb }}">
         <img id="upload-meme-img" alt="" width="360" referrerpolicy="no-referrer">
     </figure>
 
@@ -63,11 +65,17 @@
     const memeFigure = document.getElementById("upload-meme");
     const memeImg = document.getElementById("upload-meme-img");
     let fallbackMeme = null;
+    let tooLargeMeme = null;
     try {
         fallbackMeme = JSON.parse(memeFigure.dataset.fallback);
+        tooLargeMeme = JSON.parse(memeFigure.dataset.tooLarge);
     } catch (err) {
-        fallbackMeme = null;
+        // Missing memes just mean no picture.
     }
+    // The server enforces this too; checking here avoids sending big files
+    // only to have them rejected.
+    const maxFileMb = Number(memeFigure.dataset.maxFileMb);
+    const maxFileBytes = maxFileMb * 1024 * 1024;
 
     function showMeme(meme) {
         if (!meme || !meme.url) {
@@ -138,8 +146,25 @@
     }
 
     function uploadFiles(fileList) {
+        const files = Array.from(fileList);
+        const accepted = files.filter((file) => file.size <= maxFileBytes);
+        const tooLargeCount = files.length - accepted.length;
+        const tooLargeMessage = tooLargeCount
+            ? "Skipped " + tooLargeCount + " file(s) that are too large. Each file can be at most " + maxFileMb + " MB."
+            : null;
+
+        if (!accepted.length) {
+            fileInput.value = "";
+            progressWrap.hidden = false;
+            progressBar.style.width = "0%";
+            progressLabel.textContent = tooLargeMessage;
+            showMeme(tooLargeMeme);
+            setTimeout(() => { progressWrap.hidden = true; }, 6000);
+            return;
+        }
+
         const formData = new FormData();
-        for (const file of fileList) formData.append("files", file);
+        for (const file of accepted) formData.append("files", file);
 
         const xhr = new XMLHttpRequest();
         xhr.open("POST", form.action || window.location.href, true);
@@ -175,7 +200,11 @@
                 data = null;
             }
 
-            showMeme((data && data.meme) || (xhr.status >= 400 ? fallbackMeme : null));
+            let meme = (data && data.meme) || (xhr.status >= 400 ? fallbackMeme : null);
+            if (tooLargeMessage && xhr.status >= 200 && xhr.status < 300 && data && !data.error) {
+                meme = tooLargeMeme;
+            }
+            showMeme(meme);
 
             if (xhr.status === 401) {
                 finish((data && data.error) || "Your session has expired. Please sign in again.", 4000);
@@ -185,8 +214,8 @@
             if (xhr.status >= 200 && xhr.status < 300 && data && data.files) {
                 progressBar.style.width = "100%";
                 renderRows(data.files);
-                let message = data.error || "Upload complete";
-                if (!data.error && data.skipped && data.skipped.length && !(data.saved && data.saved.length)) {
+                let message = data.error || tooLargeMessage || "Upload complete";
+                if (!data.error && !tooLargeMessage && data.skipped && data.skipped.length && !(data.saved && data.saved.length)) {
                     message = "Skipped " + data.skipped.length + " file(s) with an invalid name.";
                 }
                 finish(message, message === "Upload complete" ? 1200 : 6000);

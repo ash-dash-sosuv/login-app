@@ -78,6 +78,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-insecure-secret-change-me")
 MAX_UPLOAD_MB = 500
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024  # per upload request
+MAX_FILE_MB = 5  # per individual file; checked in files_upload
 app.config["RATELIMIT_ENABLED"] = True
 # Templates show a meme under messages: {{ meme(meme_for(error)) }}.
 app.jinja_env.globals.update(
@@ -730,6 +731,15 @@ def format_file_size(num_bytes):
     return f"{size:.1f} TB"
 
 
+def uploaded_file_size(file):
+    """Size in bytes of an uploaded FileStorage, leaving its stream rewound."""
+    stream = file.stream
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(0)
+    return size
+
+
 def user_upload_dir(user_id):
     """Each user's files live in their own subfolder, UPLOAD_DIR/<user id>.
 
@@ -1245,12 +1255,15 @@ def files_upload():
     user_dir = user_upload_dir(session["user_id"])
     if request.method == "POST":
         uploaded = [f for f in request.files.getlist("files") if f and f.filename]
-        saved, skipped, failed = [], [], []
+        saved, skipped, too_large, failed = [], [], [], []
 
         for file in uploaded:
             filename = secure_filename(file.filename)
             if not filename:
                 skipped.append(file.filename)
+                continue
+            if uploaded_file_size(file) > MAX_FILE_MB * 1024 * 1024:
+                too_large.append(file.filename)
                 continue
             filename = unique_filename(user_dir, filename)
             path = os.path.join(user_dir, filename)
@@ -1272,9 +1285,16 @@ def files_upload():
             if failed
             else None
         )
+        too_large_message = (
+            f"Skipped {len(too_large)} file(s) that are too large. Each file can be at most {MAX_FILE_MB} MB."
+            if too_large
+            else None
+        )
         if _wants_json():
             if failed:
                 meme = memes.meme_by_key("upload_failed")
+            elif too_large:
+                meme = memes.meme_by_key("too_large")
             elif saved:
                 meme = memes.meme_by_key("uploaded")
             else:
@@ -1282,8 +1302,9 @@ def files_upload():
             return jsonify(
                 saved=saved,
                 skipped=skipped,
+                too_large=too_large,
                 failed=failed,
-                error=failed_message,
+                error=failed_message or too_large_message,
                 meme=meme,
                 files=list_uploaded_files(user_dir),
             )
@@ -1292,11 +1313,15 @@ def files_upload():
             flash(f"Uploaded {len(saved)} file(s) successfully.", "success")
         if skipped:
             flash(f"Skipped {len(skipped)} file(s) with an invalid name.", "error")
+        if too_large_message:
+            flash(too_large_message, "error")
         if failed_message:
             flash(failed_message, "error")
         return redirect(url_for("files_upload"))
 
-    return render_template("files_upload.html", email=session["email"], files=list_uploaded_files(user_dir))
+    return render_template(
+        "files_upload.html", email=session["email"], files=list_uploaded_files(user_dir), max_file_mb=MAX_FILE_MB
+    )
 
 
 @app.route("/files/download")

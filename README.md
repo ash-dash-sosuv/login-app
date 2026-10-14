@@ -16,7 +16,7 @@ users.
     1Password, etc.), set up by scanning a QR code.
 - **Profile:** change password, and enable or disable each 2FA method. At
   least one method must stay enabled.
-- **Files:** upload one or more files (up to 500 MB per request), browse
+- **Files:** upload one or more files (up to 5 MB per file, 500 MB per request), browse
   them, and download them. The dashboard shows file count, total size, and
   recent uploads.
 - **Structured logging:** auth and 2FA events are logged as `key=value` lines,

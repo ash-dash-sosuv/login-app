@@ -583,6 +583,54 @@ class ErrorHandlingTests(unittest.TestCase):
         with self.client.session_transaction() as sess:
             self.assertIn("limited to", sess["_flashes"][0][1])
 
+    def test_file_over_per_file_limit_is_rejected_and_not_saved(self):
+        self._sign_in()
+        with patch.object(auth_module, "MAX_FILE_MB", 0):
+            response = self._upload(headers=self.XHR)
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["too_large"], ["a.txt"])
+        self.assertEqual(data["saved"], [])
+        self.assertIn("too large", data["error"])
+        self.assertEqual(os.listdir(auth_module.user_upload_dir(self.user_id)), [])
+
+    def test_only_oversized_files_are_rejected_in_a_mixed_upload(self):
+        self._sign_in()
+        big = b"x" * (auth_module.MAX_FILE_MB * 1024 * 1024 + 1)
+        response = self.client.post(
+            "/files/upload",
+            data={"files": [(io.BytesIO(b"small"), "small.txt"), (io.BytesIO(big), "big.bin")]},
+            content_type="multipart/form-data",
+            headers=self.XHR,
+        )
+
+        data = response.get_json()
+        self.assertEqual(data["saved"], ["small.txt"])
+        self.assertEqual(data["too_large"], ["big.bin"])
+        self.assertEqual(os.listdir(auth_module.user_upload_dir(self.user_id)), ["small.txt"])
+
+    def test_file_at_exactly_the_limit_is_accepted(self):
+        self._sign_in()
+        exact = b"x" * (auth_module.MAX_FILE_MB * 1024 * 1024)
+        response = self.client.post(
+            "/files/upload",
+            data={"files": (io.BytesIO(exact), "exact.bin")},
+            content_type="multipart/form-data",
+            headers=self.XHR,
+        )
+
+        self.assertEqual(response.get_json()["saved"], ["exact.bin"])
+
+    def test_oversized_file_from_plain_form_flashes_message(self):
+        self._sign_in()
+        with patch.object(auth_module, "MAX_FILE_MB", 0):
+            response = self._upload()
+
+        self.assertEqual(response.headers["Location"], "/files/upload")
+        with self.client.session_transaction() as sess:
+            self.assertIn("too large", sess["_flashes"][0][1])
+
     def test_disk_full_during_upload_is_reported_and_leaves_no_partial_file(self):
         self._sign_in()
         disk_full = OSError(28, "No space left on device")
