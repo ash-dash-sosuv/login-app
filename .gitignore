@@ -15,6 +15,7 @@ env/
 # Server data folders created by docker-compose / deploy.sh
 data/
 uploads/
+f1-site/
 
 # Environment / secrets
 .env

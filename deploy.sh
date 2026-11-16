@@ -75,7 +75,7 @@ if ! grep -qE '^SECRET_KEY=.{32,}' .env || grep -q '^SECRET_KEY=change-me' .env;
   sed -i '/^SECRET_KEY=/d' .env
   echo "SECRET_KEY=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> .env
 fi
-mkdir -p data uploads
+mkdir -p data uploads f1-site
 
 # Reuse a custom domain saved in .env; sslip.io names are recomputed because
 # the public IP changes when the instance is stopped and started.
@@ -109,4 +109,5 @@ sudo -E docker compose up -d --build --remove-orphans
 sudo docker image prune -f >/dev/null
 
 log "Done. App: https://$DOMAIN  (first certificate can take ~30s)"
+echo "F1 site: https://${F1_DOMAIN:-f1.$DOMAIN}"
 echo "Logs: sudo docker compose logs -f app"

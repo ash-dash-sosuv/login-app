@@ -31,8 +31,11 @@ services:
     environment:
       # deploy.sh writes DOMAIN into .env, which Compose loads automatically.
       DOMAIN: ${DOMAIN:?DOMAIN must be set - run ./deploy.sh or add DOMAIN=... to .env}
+      F1_DOMAIN: ${F1_DOMAIN:-f1.${DOMAIN}}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Static F1 stats site, uploaded separately (rsync into ./f1-site).
+      - ./f1-site:/srv/f1:ro
       - caddy_data:/data
       - caddy_config:/config
 
