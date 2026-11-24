@@ -854,12 +854,50 @@ def login():
             session["pending_2fa_email"] = user[1]
             session["pending_2fa_secret"] = user[4] or pyotp.random_base32()
             logger.info("login_password_verified user_id=%s email=%s", user[0], _mask_email(email))
-            return redirect(url_for("two_factor_choose"))
+            return redirect(url_for("tenant_select"))
 
         logger.warning("login_rejected email=%s", _mask_email(email))
         return render_template("login.html", error="Invalid email or password")
 
     return render_template("login.html")
+
+
+# Tenants shown after the password check. Only tenants with available=True
+# continue to two-factor; the rest lead to the "unavailable" page.
+TENANTS = [
+    {"id": "northwind", "name": "Northwind Investor Portal", "host": "eu1.vaultly.app",
+     "initials": "NW", "color": "#1e3a8a", "available": True},
+    {"id": "harborline", "name": "Harborline Ventures Portal", "host": "eu1.vaultly.app",
+     "initials": "HV", "color": "#3f3f46", "available": False},
+    {"id": "summit", "name": "summitfund", "host": "us2.vaultly.app",
+     "initials": "SF", "color": "#0f766e", "available": False},
+    {"id": "meridian", "name": "Meridian Innovation Network", "host": "us4.vaultly.app",
+     "initials": "MI", "color": "#0b193e", "available": False},
+]
+TENANTS_BY_ID = {tenant["id"]: tenant for tenant in TENANTS}
+
+
+@app.route("/tenant", methods=["GET", "POST"])
+def tenant_select():
+    if "pending_2fa_user_id" not in session:
+        logger.warning("tenant_select_rejected reason=no_pending_user")
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        tenant = TENANTS_BY_ID.get(request.form.get("tenant", ""))
+        if tenant and tenant["available"]:
+            session["pending_tenant"] = tenant["id"]
+            logger.info("tenant_selected tenant=%s", tenant["id"])
+            return redirect(url_for("two_factor_choose"))
+        logger.info("tenant_unavailable tenant=%s", tenant["id"] if tenant else "unknown")
+        return redirect(url_for("tenant_unavailable"))
+
+    return render_template("tenant_select.html", tenants=TENANTS)
+
+
+@app.route("/tenant/unavailable")
+def tenant_unavailable():
+    return render_template("tenant_unavailable.html")
 
 
 def login_methods(user):
@@ -900,7 +938,7 @@ def mfa_status(user):
 def _complete_login(user):
     session["user_id"] = user[0]
     session["email"] = user[1]
-    for key in ("pending_2fa_user_id", "pending_2fa_email", "pending_2fa_secret", "pending_sms_phone"):
+    for key in ("pending_2fa_user_id", "pending_2fa_email", "pending_2fa_secret", "pending_sms_phone", "pending_tenant"):
         session.pop(key, None)
 
 

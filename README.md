@@ -59,14 +59,17 @@ python -m unittest discover -s tests
 ## Sign-in flow
 
 1. `/login`: email and password are checked.
-2. `/two-factor/choose`: the user picks Email, SMS, or Authenticator.
+2. `/tenant`: the user picks one of four tenants (defined in `TENANTS` in
+   `app.py`). Only the first tenant continues; the others show a "Sorry" page
+   at `/tenant/unavailable` with a link back.
+3. `/two-factor/choose`: the user picks Email, SMS, or Authenticator.
    - **Email:** a code is sent and checked at `/two-factor/email`.
    - **SMS:** if the account has a verified phone, a code is sent straight
      away. Otherwise the user enters a number at `/two-factor/sms`, and it is
      saved only after the texted code is confirmed.
    - **Authenticator:** first-time users scan a QR code at
      `/two-factor/setup`. Returning users enter a code at `/two-factor/verify`.
-3. On success the user lands on `/dashboard`.
+4. On success the user lands on `/dashboard`.
 
 Email OTP codes are stored only as a hash with an expiry in the session.
 Twilio generates and checks SMS codes, so the app never stores them.

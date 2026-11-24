@@ -55,7 +55,42 @@ class TwoFactorAuthTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/tenant")
+
+    def test_tenant_page_lists_four_tenants(self):
+        auth_module.create_user("tenant@example.com", "password123")
+        self.client.post("/login", data={"email": "tenant@example.com", "password": "password123"})
+
+        response = self.client.get("/tenant")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.count(b'data-testid="tenant-card"'), 4)
+
+    def test_first_tenant_continues_to_choose_verification(self):
+        auth_module.create_user("tenant@example.com", "password123")
+        self.client.post("/login", data={"email": "tenant@example.com", "password": "password123"})
+
+        response = self.client.post(
+            "/tenant", data={"tenant": auth_module.TENANTS[0]["id"]}, follow_redirects=False
+        )
+
         self.assertEqual(response.headers["Location"], "/two-factor/choose")
+
+    def test_other_tenants_go_to_unavailable_page(self):
+        auth_module.create_user("tenant@example.com", "password123")
+        self.client.post("/login", data={"email": "tenant@example.com", "password": "password123"})
+
+        for tenant in auth_module.TENANTS[1:] + [{"id": "bogus"}]:
+            response = self.client.post("/tenant", data={"tenant": tenant["id"]}, follow_redirects=False)
+            self.assertEqual(response.headers["Location"], "/tenant/unavailable")
+
+        page = self.client.get("/tenant/unavailable")
+        self.assertIn(b"Sorry", page.data)
+        self.assertIn(b'href="/tenant"', page.data)
+
+    def test_tenant_page_requires_password_step(self):
+        response = self.client.get("/tenant", follow_redirects=False)
+        self.assertEqual(response.headers["Location"], "/login")
 
     def _log_in_with_password(self, email):
         self.client.post("/login", data={"email": email, "password": "password123"})

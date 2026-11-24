@@ -1,0 +1,12 @@
+{% extends "auth_base.html" %}
+{% block title %}Tenant unavailable{% endblock %}
+
+{% block content %}
+<span class="auth-eyebrow">Tenant selection</span>
+<h1 class="auth-title">Sorry</h1>
+<p class="auth-subtitle">This tenant isn't available for sign-in right now. Please go back and choose another one.</p>
+
+<div class="auth-links">
+    <a href="{{ url_for('tenant_select') }}">&larr; Go back</a>
+</div>
+{% endblock %}

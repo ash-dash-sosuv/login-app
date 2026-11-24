@@ -1,0 +1,27 @@
+{% extends "auth_base.html" %}
+{% block title %}Tenant selection{% endblock %}
+{% block card_class %} auth-card-wide{% endblock %}
+
+{% block content %}
+<span class="auth-eyebrow">One more step</span>
+<h1 class="auth-title" data-testid="tenant-selection-header">Tenant selection</h1>
+<p class="auth-subtitle">Choose the portal you want to sign in to.</p>
+
+<form method="POST" class="tenant-grid" data-testid="tenant-selection-body">
+    {% for tenant in tenants %}
+    <button type="submit" name="tenant" value="{{ tenant.id }}" class="tenant-card"
+            data-testid="tenant-card" data-tenant-name="{{ tenant.name | lower }}"
+            data-slot-label="{{ tenant.host }}">
+        <span class="tenant-logo" style="background-color: {{ tenant.color }};" aria-hidden="true">{{ tenant.initials }}</span>
+        <span class="tenant-card-body">
+            <span class="tenant-name" data-testid="tenant-display-name" title="{{ tenant.name }}">{{ tenant.name }}</span>
+            <span class="tenant-host" data-testid="slot-label">{{ tenant.host }}</span>
+        </span>
+    </button>
+    {% endfor %}
+</form>
+
+<div class="auth-links">
+    <a href="{{ url_for('logout') }}">Not you? Start over</a>
+</div>
+{% endblock %}
